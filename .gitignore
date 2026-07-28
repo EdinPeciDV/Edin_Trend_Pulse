@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+.env.local
+.netlify
+.DS_Store
+*.log
+
+# ML
+ml/cache/
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,59 @@
+# ===================================================================
+# TrendPulse — Netlify configuration
+# ===================================================================
+
+[build]
+  command  = "npm run build"
+  publish  = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  # Functions and shared/ use ESM + top-level await patterns.
+  NODE_VERSION = "24"
+
+# --- Function bundling -------------------------------------------------
+# esbuild is required so `import` from ../../shared/ is bundled correctly.
+[functions]
+  node_bundler = "esbuild"
+  # Files outside netlify/functions that must be pulled into the bundle.
+  included_files = ["shared/**"]
+
+[functions."schedule-task"]
+  # Cron is also declared in code via schedule(). Declaring it here makes
+  # it visible in the Netlify UI and survives if the code export changes.
+  schedule = "*/5 * * * *"
+
+# --- Pretty API paths -------------------------------------------------
+# /api/get-analysis  ->  /.netlify/functions/get-analysis
+[[redirects]]
+  from = "/api/*"
+  to   = "/.netlify/functions/:splat"
+  status = 200
+  force = true
+
+# --- SPA fallback (must come AFTER the API rule) ----------------------
+[[redirects]]
+  from = "/*"
+  to   = "/index.html"
+  status = 200
+
+# --- Security headers -------------------------------------------------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "geolocation=(), microphone=(), camera=()"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# --- Local dev --------------------------------------------------------
+[dev]
+  command = "vite"
+  targetPort = 5273
+  port = 8888
+  autoLaunch = false

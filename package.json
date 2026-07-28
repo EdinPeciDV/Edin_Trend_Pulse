@@ -1,0 +1,40 @@
+{
+  "name": "trendpulse",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Momentum signals for crypto and forex. Netlify + Supabase + React.",
+  "scripts": {
+    "dev": "netlify dev",
+    "dev:vite": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
+    "ingest": "netlify functions:invoke fetch-market-data --no-identity",
+    "cron": "netlify functions:invoke schedule-task --no-identity",
+    "test": "node tests/indicators.test.mjs",
+    "test:parity": "python3 ml/parity.py",
+    "train": "python3 ml/train.py"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "recharts": "^2.12.7"
+  },
+  "devDependencies": {
+    "@netlify/functions": "^2.8.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-plugin-react": "^7.35.2",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "vite": "^5.4.8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

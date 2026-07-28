@@ -1,0 +1,14 @@
+# ML pipeline dependencies. Kept minimal on purpose: everything here is
+# used by ml/*.py, and the JS runtime needs none of it — inference is a
+# dot product in shared/mlModel.js.
+numpy>=1.26
+# >=1.6 for sklearn.frozen.FrozenEstimator, used by validation.py's
+# calibrate_probabilities() (Phase 1.2) to calibrate on a held-out fold
+# without CalibratedClassifierCV re-fitting the base model. Falls back to
+# the older cv='prefit' API automatically on <1.6.
+scikit-learn>=1.6
+
+# Optional — only needed for ml/volatility.py's GARCH(1,1) (Phase 3).
+# HAR-RV, the default volatility model, needs nothing beyond the above.
+# pip install arch
+# arch>=6.3

@@ -1,0 +1,120 @@
+# ===================================================================
+# Retrain — scheduled model refresh that opens a PULL REQUEST.
+#
+# It deliberately does NOT commit to main. A model is a behavioural
+# change to the product, and it goes through review like any other:
+# the PR body carries the walk-forward numbers, Netlify builds a deploy
+# preview from the branch, and you decide.
+#
+# Note the guard: if the new model shows no edge, train.py refuses to
+# export, the model.json on disk is unchanged, and no PR is opened. An
+# automated pipeline that ships an unvalidated model on a timer is worse
+# than no automation.
+#
+# Requires repo secrets:
+#   TWELVE_DATA_API_KEY   (only if retraining a forex pair)
+# ===================================================================
+
+name: Retrain model
+
+on:
+  schedule:
+    # 04:00 UTC each Monday — after the weekend, before the London open.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Symbol to train on'
+        required: true
+        default: 'BTC/USDT'
+      horizon:
+        description: 'Forecast horizon in 5-minute bars (12 = 60 min)'
+        required: false
+        default: '12'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r ml/requirements.txt
+
+      # Parity first. Training against features that disagree with the
+      # JS runtime would produce a model that is wrong on arrival.
+      - name: Feature parity gate
+        run: python3 ml/parity.py
+
+      - name: Train and export
+        id: train
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          BINANCE_HOST: ${{ vars.BINANCE_HOST || 'api.binance.com' }}
+        run: |
+          SYMBOL="${{ github.event.inputs.symbol || 'BTC/USDT' }}"
+          HORIZON="${{ github.event.inputs.horizon || '12' }}"
+          echo "Training on $SYMBOL, horizon $HORIZON bars"
+
+          python3 ml/train.py \
+            --symbol "$SYMBOL" \
+            --horizon "$HORIZON" \
+            --model logreg \
+            --export \
+            | tee /tmp/train.log
+
+          # train.py blocks its own export when there is no edge.
+          if grep -q "EXPORT BLOCKED" /tmp/train.log; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No edge found — export blocked, no PR will be opened."
+          elif git diff --quiet -- shared/model.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Model is unchanged."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo 'summary<<EOF'
+            sed -n '/WALK-FORWARD RESULTS/,/^===*$/p' /tmp/train.log | head -40
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: steps.train.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: model/retrain-${{ github.run_number }}
+          delete-branch: true
+          commit-message: 'model: retrain on ${{ github.event.inputs.symbol || "BTC/USDT" }}'
+          title: 'Model retrain — ${{ github.event.inputs.symbol || "BTC/USDT" }} (run ${{ github.run_number }})'
+          labels: model, automated
+          body: |
+            Automated retrain. **Read the walk-forward numbers before merging.**
+
+            ```
+            ${{ steps.train.outputs.summary }}
+            ```
+
+            Merge checklist:
+            - [ ] `EDGE` is positive and larger than roughly 2x its own SD
+            - [ ] Positive in at least 4 of 5 folds — otherwise it is fold luck
+            - [ ] `net bps` is positive after costs, or you accept it is not tradeable
+            - [ ] Beats the `heuristic` row; if not, the simpler system should win
+            - [ ] Feature weights look sensible (a 24/7 crypto pair leaning on
+                  `hour_sin`/`hour_cos` is a red flag)
+            - [ ] Netlify deploy preview on this branch looks right
+
+            Rejecting this PR is a normal outcome. Most retrains find no edge.

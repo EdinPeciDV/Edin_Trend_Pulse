@@ -1,0 +1,104 @@
+# ===================================================================
+# CI — runs on every push and pull request.
+#
+# The ML-specific jobs are the point of this file. A normal web CI would
+# just build and lint; here the two checks that actually prevent damage
+# are the feature-parity test and the harness self-test:
+#
+#   parity      — Python and JS must compute identical features, or the
+#                 deployed model silently receives garbage.
+#   self-test   — the validation harness must report NO edge on a random
+#                 walk. If that ever fails, the harness is leaking and
+#                 every performance number it has ever produced is void.
+#
+# Both are cheap and both gate the merge.
+# ===================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Build & indicator tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Indicator unit tests
+        run: npm test
+
+      - name: Functions must bundle (catches bad shared/ imports)
+        run: |
+          npx esbuild netlify/functions/*.js \
+            --bundle --platform=node --target=node20 --format=esm \
+            --outdir=/tmp/fnbundle --external:@netlify/functions
+
+      - name: No secrets in the client bundle
+        run: |
+          if grep -rqE "eyJ[A-Za-z0-9_-]{20,}" dist/assets/*.js; then
+            echo "::error::A JWT-shaped string is present in the client bundle."
+            exit 1
+          fi
+          echo "No JWT-shaped strings in dist/ — OK"
+
+  ml:
+    name: ML parity & harness integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r ml/requirements.txt
+
+      - name: Feature parity (Python vs JS)
+        run: python3 ml/parity.py
+
+      - name: Harness self-test — must find NO edge in a random walk
+        run: |
+          out=$(python3 ml/train.py --synthetic random)
+          echo "$out"
+          if ! echo "$out" | grep -qE "VERDICT: *(NO_EDGE|NOISE|WEAK)"; then
+            echo "::error::Harness claims an edge on a random walk. It is leaking."
+            exit 1
+          fi
+          echo "Correctly reported no edge on random data."
+
+      - name: Harness self-test — must FIND a planted edge
+        run: |
+          out=$(python3 ml/train.py --synthetic signal)
+          echo "$out"
+          if ! echo "$out" | grep -q "VERDICT: *PROMISING"; then
+            echo "::error::Harness missed a deliberately planted signal. It is broken."
+            exit 1
+          fi
+          echo "Correctly detected the planted signal."
+
+      - name: Leakage demo (informational)
+        run: python3 ml/leakage_demo.py

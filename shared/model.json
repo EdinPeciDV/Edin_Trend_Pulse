@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "absent",
+  "note": "Placeholder — no model trained yet. TrendPulse runs on the rule-based heuristic until you replace this file. This file must exist so the static import in netlify/functions/get-analysis.js resolves at build time. Generate a real one with: python3 ml/train.py --symbol BTC/USDT --export",
+  "meta": {
+    "verdict": "UNTRAINED"
+  }
+}

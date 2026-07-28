@@ -1,0 +1,234 @@
+/* ===================================================================
+   TrendPulse — global styles
+   =================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter+Tight:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* Base layer                                                          */
+/* ------------------------------------------------------------------ */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-hairline;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-base text-ink font-mono antialiased;
+    /* A very faint horizontal scanline field. Barely visible, but it
+       stops large dark areas from reading as flat dead space. */
+    background-image: repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.014) 0px,
+      rgba(255, 255, 255, 0.014) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-sans font-semibold tracking-tight;
+  }
+
+  /* Tabular figures everywhere numbers appear, so digits never shift
+     as prices tick. This is the single most important typographic
+     decision in the whole app. */
+  .tnum,
+  td, th,
+  input[type='number'] {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  /* Visible keyboard focus — amber, never removed. */
+  :focus-visible {
+    @apply outline-none ring-1 ring-amber ring-offset-2 ring-offset-base;
+  }
+
+  ::selection {
+    background: rgba(232, 179, 57, 0.25);
+  }
+
+  /* Scrollbars, styled to match the chrome. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-base;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-hairline;
+    border: 2px solid #0a0e14;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-divider;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Components                                                          */
+/* ------------------------------------------------------------------ */
+
+@layer components {
+  /* The panel: every box in the app is one of these. */
+  .panel {
+    @apply bg-panel border border-hairline rounded-panel shadow-panel;
+  }
+
+  /* Uppercase letterspaced micro-label. The terminal's voice. */
+  .label {
+    @apply text-micro uppercase text-ink-faint font-medium;
+  }
+
+  .label-amber {
+    @apply text-micro uppercase text-amber font-medium;
+  }
+
+  /* Dense data row: label left, value right, hairline below. */
+  .data-row {
+    @apply flex items-baseline justify-between gap-4 py-2
+           border-b border-hairline last:border-0;
+  }
+
+  .data-value {
+    @apply tnum text-sm text-ink;
+  }
+
+  /* Buttons ------------------------------------------------------- */
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2
+           text-tick uppercase font-medium tracking-wider
+           border rounded-pill transition-colors duration-150
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply btn border-hairline text-ink-muted
+           hover:border-divider hover:text-ink;
+  }
+
+  .btn-amber {
+    @apply btn border-amber/40 text-amber bg-amber-glow
+           hover:bg-amber/20 hover:border-amber;
+  }
+
+  /* Segmented toggle (strategy switcher) ------------------------- */
+
+  .segment {
+    @apply flex border border-hairline rounded-pill overflow-hidden;
+  }
+
+  .segment-item {
+    @apply flex-1 px-3 py-2 text-tick uppercase tracking-wider
+           text-ink-faint transition-colors duration-150
+           hover:text-ink-muted;
+  }
+
+  .segment-item-active {
+    @apply bg-amber-glow text-amber;
+  }
+
+  /* Directional text/border helpers ----------------------------- */
+
+  .dir-up    { @apply text-up; }
+  .dir-down  { @apply text-down; }
+  .dir-flat  { @apply text-flat; }
+
+  /* Table ------------------------------------------------------- */
+
+  .term-table {
+    @apply w-full text-left border-collapse;
+  }
+
+  .term-table th {
+    @apply label py-2 px-3 border-b border-divider whitespace-nowrap;
+  }
+
+  .term-table td {
+    @apply py-2 px-3 text-tick border-b border-hairline whitespace-nowrap;
+  }
+
+  .term-table tbody tr:hover {
+    @apply bg-raised/60;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Utilities                                                           */
+/* ------------------------------------------------------------------ */
+
+@layer utilities {
+  /* Thin top-edge highlight, gives panels a machined feel. */
+  .edge-top {
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.045);
+  }
+
+  /* Sweeping loading bar, used only while data is in flight. */
+  .scanline::after {
+    content: '';
+    @apply absolute inset-y-0 w-1/3 animate-scan;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(232, 179, 57, 0.18),
+      transparent
+    );
+  }
+
+  .grid-dense {
+    @apply grid gap-px bg-hairline;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Recharts overrides                                                  */
+/* ------------------------------------------------------------------ */
+
+.recharts-cartesian-axis-tick text {
+  fill: #5a6878 !important;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.recharts-cartesian-grid line {
+  stroke: #1e2733 !important;
+}
+
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+.recharts-surface {
+  overflow: visible;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion                                                      */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  body {
+    background-image: none;
+  }
+}
