@@ -12,7 +12,15 @@
 
 import { useState } from 'react';
 import { STRATEGY_PROFILES } from '../lib/helpers.js';
-import { signInWithEmail, signInWithGitHub, signOut, isSupabaseConfigured } from '../lib/supabaseClient.js';
+import {
+  signInWithEmail,
+  signInWithGitHub,
+  signInWithGoogle,
+  signOut,
+  isSupabaseConfigured,
+} from '../lib/supabaseClient.js';
+import { openCheckout, isPaddleConfigured } from '../lib/paddle.js';
+import { PLAN_LIMITS } from '../lib/plans.js';
 
 /* ------------------------------------------------------------------ */
 /* Strategy comparison                                                 */
@@ -139,6 +147,17 @@ function AccountPanel({ session, profile }) {
     }
   };
 
+  const handleGoogle = async () => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      setStatus({ type: 'error', text: err.message });
+      setBusy(false);
+    }
+  };
+
   if (!isSupabaseConfigured) {
     return (
       <section className="panel px-4 py-4">
@@ -216,6 +235,15 @@ function AccountPanel({ session, profile }) {
 
             <button
               type="button"
+              onClick={handleGoogle}
+              disabled={busy}
+              className="btn-ghost w-full"
+            >
+              Continue with Google
+            </button>
+
+            <button
+              type="button"
               onClick={handleGitHub}
               disabled={busy}
               className="btn-ghost w-full"
@@ -241,6 +269,94 @@ function AccountPanel({ session, profile }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Billing                                                             */
+/* ------------------------------------------------------------------ */
+
+function BillingPanel({ session, profile }) {
+  const [busyPlan, setBusyPlan] = useState(null);
+  const [error, setError] = useState(null);
+  const currentPlan = profile?.plan || 'free';
+
+  const handleSubscribe = async (planKey) => {
+    const plan = PLAN_LIMITS[planKey];
+    setError(null);
+    setBusyPlan(planKey);
+    try {
+      await openCheckout(plan.paddlePriceId, session?.user?.id, session?.user?.email);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyPlan(null);
+    }
+  };
+
+  return (
+    <section className="panel edge-top">
+      <header className="border-b border-divider px-4 py-3">
+        <h2 className="font-sans text-sm font-semibold uppercase tracking-widest text-ink">
+          Billing
+        </h2>
+        <p className="mt-0.5 text-micro normal-case text-ink-faint">
+          Current plan: <span className="text-amber uppercase">{currentPlan}</span>
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 gap-px bg-hairline sm:grid-cols-3">
+        {Object.values(PLAN_LIMITS).map((plan) => {
+          const isCurrent = plan.key === currentPlan;
+          return (
+            <div key={plan.key} className="bg-panel px-4 py-3.5">
+              <p className="label">{plan.label}</p>
+              <p className="tnum mt-1 text-lg text-ink">{plan.priceLabel}</p>
+              <ul className="mt-2 space-y-0.5 text-tick normal-case text-ink-muted">
+                <li>
+                  {plan.maxInstruments} pair{plan.maxInstruments === 1 ? '' : 's'}
+                </li>
+                <li>{plan.historyDays}-day prediction history</li>
+              </ul>
+
+              {isCurrent ? (
+                <p className="mt-3 text-micro uppercase text-up">current plan</p>
+              ) : plan.key === 'free' ? (
+                <p className="mt-3 text-micro uppercase text-ink-faint">default</p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleSubscribe(plan.key)}
+                  disabled={Boolean(busyPlan) || !isPaddleConfigured || !session}
+                  className="btn-amber mt-3 w-full"
+                >
+                  {busyPlan === plan.key ? 'Opening checkout…' : 'Subscribe'}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="border-t border-hairline px-4 py-2.5">
+        {!session && (
+          <p className="text-tick normal-case text-ink-faint">
+            Sign in above to subscribe — Paddle needs an account to attach the plan to.
+          </p>
+        )}
+        {session && !isPaddleConfigured && (
+          <p className="text-tick normal-case text-ink-faint">
+            Billing isn't configured yet (VITE_PADDLE_CLIENT_TOKEN is not set).
+          </p>
+        )}
+        {error && <p className="text-tick normal-case text-amber">{error}</p>}
+        <p className="mt-1 text-micro normal-case text-ink-faint">
+          Plan changes take effect once Paddle confirms the payment — usually a few
+          seconds, sometimes up to a minute. Cancelling in Paddle's customer portal
+          reverts you to Free at the end of the billing period.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -258,6 +374,7 @@ export default function Settings({ strategy, onStrategyChange, session, profile,
 
       <StrategyPanel strategy={strategy} onChange={onStrategyChange} isSaving={isSaving} />
       <AccountPanel session={session} profile={profile} />
+      <BillingPanel session={session} profile={profile} />
 
       {/* Scope + limits. Deliberately not buried in a footer. */}
       <section className="panel border-amber/30 px-4 py-4">

@@ -60,6 +60,15 @@ export async function signInWithGitHub() {
   if (error) throw error;
 }
 
+export async function signInWithGoogle() {
+  if (!supabase) throw new Error('Sign-in is unavailable: Supabase is not configured.');
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.origin },
+  });
+  if (error) throw error;
+}
+
 export async function signOut() {
   if (!supabase) return;
   await supabase.auth.signOut();
@@ -73,13 +82,53 @@ export async function getProfile(userId) {
   if (!supabase || !userId) return null;
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, username, risk_tolerance')
+    .select('id, username, risk_tolerance, plan')
     .eq('id', userId)
     .maybeSingle();
   if (error) {
     console.error('[TrendPulse] profile read failed:', error.message);
     return null;
   }
+  return data;
+}
+
+export async function getUserPlan(userId) {
+  if (!supabase || !userId) return 'free';
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('plan')
+    .eq('id', userId)
+    .maybeSingle();
+  if (error) {
+    console.error('[TrendPulse] plan read failed:', error.message);
+    return 'free';
+  }
+  return data?.plan || 'free';
+}
+
+/**
+ * Attempt to set a user's plan directly from the browser.
+ *
+ * THIS WILL NOT ACTUALLY CHANGE THE PLAN. supabase/migrations.sql adds
+ * a database trigger (`prevent_client_plan_change`) that silently
+ * reverts any write to `profiles.plan` that doesn't come from the
+ * service role — specifically so this call (or the equivalent typed
+ * into devtools by anyone) can't upgrade an account for free. The only
+ * real path to a plan change is netlify/functions/webhook.js, triggered
+ * by a signature-verified Paddle payment. This function exists for API
+ * symmetry with getUserPlan() (and so a future admin tool running under
+ * the service role has something to call) — client code should never
+ * rely on it succeeding.
+ */
+export async function updateUserPlan(userId, plan) {
+  if (!supabase || !userId) return null;
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({ plan, updated_at: new Date().toISOString() })
+    .eq('id', userId)
+    .select()
+    .maybeSingle();
+  if (error) throw error;
   return data;
 }
 

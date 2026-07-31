@@ -10,9 +10,11 @@
  */
 
 import { useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import PredictionCard from './PredictionCard.jsx';
 import { fetchDashboard, usePolling } from '../lib/api.js';
 import { timeAgo } from '../lib/helpers.js';
+import { allowedSymbolsFor } from '../lib/plans.js';
 
 /* ------------------------------------------------------------------ */
 /* Status bar                                                          */
@@ -115,7 +117,7 @@ function AssetGroup({ title, hint, instruments, watchlist, onToggleWatch, canWat
 /* Dashboard                                                           */
 /* ------------------------------------------------------------------ */
 
-export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch }) {
+export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch, plan = 'free' }) {
   const fetcher = useCallback(
     (options) => fetchDashboard(strategy, options),
     [strategy]
@@ -127,7 +129,20 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
     [strategy]
   );
 
-  const instruments = data?.instruments || [];
+  const allInstruments = data?.instruments || [];
+
+  // Plan gating happens client-side only — see src/lib/plans.js's
+  // enforcement note. The API still returns every instrument; this
+  // just decides what gets rendered.
+  const allowed = useMemo(
+    () => new Set(allowedSymbolsFor(plan, allInstruments.map((i) => i.symbol))),
+    [plan, allInstruments]
+  );
+  const instruments = useMemo(
+    () => allInstruments.filter((i) => allowed.has(i.symbol)),
+    [allInstruments, allowed]
+  );
+  const lockedCount = allInstruments.length - instruments.length;
 
   const counts = useMemo(
     () => ({
@@ -190,6 +205,19 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
         <div className="panel border-amber/40 px-4 py-2.5">
           <p className="text-tick normal-case text-amber">
             Last refresh failed — showing data from {timeAgo(lastUpdated)}. {error}
+          </p>
+        </div>
+      )}
+
+      {/* Plan gate — how many pairs are hidden, and where to unlock them. */}
+      {lockedCount > 0 && (
+        <div className="panel border-amber/30 px-4 py-2.5">
+          <p className="text-tick normal-case text-amber">
+            {lockedCount} more pair{lockedCount === 1 ? '' : 's'} available on a higher
+            plan.{' '}
+            <Link to="/settings" className="underline underline-offset-2">
+              Upgrade
+            </Link>
           </p>
         </div>
       )}

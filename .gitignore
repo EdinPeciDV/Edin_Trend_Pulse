@@ -12,3 +12,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# sysrfx_predictor (standalone script, own cache: SQLite fallback db + hyperopt cache)
+sysrfx_predictor/cache/

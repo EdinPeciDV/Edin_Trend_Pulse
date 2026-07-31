@@ -751,6 +751,13 @@ def evaluate_pooled(per_symbol, kinds, n_splits, vertical, embargo, cost_bps, se
                     classification_metrics(yte, pred, None, fte, cost_bps)
                 )
 
+            hp = heuristic_predictions(Xte, FEATURE_NAMES)
+            op = hp >= 0
+            if op.sum() >= 20:
+                m = classification_metrics(yte[op], hp[op], None, fte[op], cost_bps)
+                m["coverage"] = float(op.mean())
+                heur_folds.append(m)
+
     return {
         "n_folds": n_folds,
         "models": {k: aggregate_folds(v) for k, v in per_model.items()},

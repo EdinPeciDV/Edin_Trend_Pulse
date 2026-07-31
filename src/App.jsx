@@ -229,6 +229,8 @@ export default function App() {
     [session?.user?.id, watchlist]
   );
 
+  const plan = profile?.plan || 'free';
+
   return (
     <div className="flex min-h-screen flex-col">
       <Header session={session} strategy={strategy} />
@@ -243,10 +245,11 @@ export default function App() {
                 watchlist={watchlist}
                 onToggleWatch={handleToggleWatch}
                 canWatch={Boolean(session)}
+                plan={plan}
               />
             }
           />
-          <Route path="/symbol/:symbol" element={<DetailView strategy={strategy} />} />
+          <Route path="/symbol/:symbol" element={<DetailView strategy={strategy} plan={plan} />} />
           <Route
             path="/settings"
             element={

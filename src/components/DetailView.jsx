@@ -17,6 +17,7 @@ import { Link, useParams } from 'react-router-dom';
 import ChartView from './ChartView.jsx';
 import ModelPanel from './ModelPanel.jsx';
 import { fetchSymbol, usePolling } from '../lib/api.js';
+import { isSymbolAllowed, withinHistoryWindow, planLimitsFor } from '../lib/plans.js';
 import {
   formatPrice,
   formatPct,
@@ -96,7 +97,7 @@ function Readouts({ inst }) {
 /* Prediction log                                                      */
 /* ------------------------------------------------------------------ */
 
-function PredictionLog({ log, symbol }) {
+function PredictionLog({ log, symbol, historyDays }) {
   const { rows = [], accuracy, graded = 0 } = log || {};
 
   return (
@@ -107,7 +108,8 @@ function PredictionLog({ log, symbol }) {
             Prediction log
           </h2>
           <p className="mt-0.5 text-micro normal-case text-ink-faint">
-            Every call, graded 60 minutes later against the actual move.
+            Every call, graded 60 minutes later against the actual move
+            {historyDays ? ` · last ${historyDays} day${historyDays === 1 ? '' : 's'} on this plan` : ''}.
           </p>
         </div>
 
@@ -214,20 +216,44 @@ function PredictionLog({ log, symbol }) {
 /* Detail view                                                         */
 /* ------------------------------------------------------------------ */
 
-export default function DetailView({ strategy }) {
+export default function DetailView({ strategy, plan = 'free' }) {
   const { symbol: rawSymbol } = useParams();
   const symbol = decodeURIComponent(rawSymbol || '');
+  const symbolAllowed = isSymbolAllowed(plan, symbol);
 
   const fetcher = useCallback(
     (options) => fetchSymbol(symbol, strategy, options),
     [symbol, strategy]
   );
 
+  // Skip fetching entirely for a symbol this plan can't see — no reason
+  // to hit the API for a page we're about to replace with an upgrade
+  // prompt. usePolling still needs a fetcher (it's called unconditionally
+  // by the hook rules), so it gets a no-op instead.
   const { data, error, loading, isRefreshing, lastUpdated, refresh } = usePolling(
-    fetcher,
+    symbolAllowed ? fetcher : async () => null,
     60000,
-    [symbol, strategy]
+    [symbol, strategy, symbolAllowed]
   );
+
+  if (!symbolAllowed) {
+    return (
+      <div className="panel border-amber/40 p-6 text-center">
+        <h2 className="label-amber">{symbol} is on a higher plan</h2>
+        <p className="mx-auto mt-2 max-w-sm text-sm normal-case text-ink-muted">
+          Your current plan ({plan}) doesn't include this pair. Upgrade to unlock it.
+        </p>
+        <div className="mt-4 flex justify-center gap-2">
+          <Link to="/settings" className="btn-amber">
+            View plans
+          </Link>
+          <Link to="/" className="btn-ghost">
+            Back to dashboard
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (loading && !data) {
     return (
@@ -257,6 +283,24 @@ export default function DetailView({ strategy }) {
 
   const inst = data?.instrument;
   if (!inst) return null;
+
+  // Filter the log to the plan's history window, then recompute
+  // accuracy/graded from THAT subset — the server's numbers cover its
+  // full 50-row lookback regardless of plan, and showing a "72% · 20
+  // graded" header over a 5-row table would be a confusing mismatch.
+  const historyDays = planLimitsFor(plan).historyDays;
+  const gatedLog = (() => {
+    if (!data.predictionLog) return data.predictionLog;
+    const rows = withinHistoryWindow(plan, data.predictionLog.rows || []);
+    const graded = rows.filter((r) => r.actual_result && r.actual_result !== 'PENDING');
+    const correct = graded.filter((r) => r.actual_result === 'CORRECT').length;
+    return {
+      ...data.predictionLog,
+      rows,
+      graded: graded.length,
+      accuracy: graded.length >= 5 ? Math.round((correct / graded.length) * 100) : null,
+    };
+  })();
 
   return (
     <div className="space-y-3">
@@ -381,7 +425,7 @@ export default function DetailView({ strategy }) {
       />
 
       {/* ---- Prediction log ---- */}
-      <PredictionLog log={data.predictionLog} symbol={inst.symbol} />
+      <PredictionLog log={gatedLog} symbol={inst.symbol} historyDays={historyDays} />
     </div>
   );
 }
