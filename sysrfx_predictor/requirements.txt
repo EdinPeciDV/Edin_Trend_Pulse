@@ -1,0 +1,32 @@
+# sysrfx_predictor dependencies — everything here is free / open-source.
+# No paid tier of any service is required for any of these to import and run;
+# several fetchers additionally need a free API key (see README.md / .env.example) —
+# every one of them degrades gracefully (skip the feature, log a warning) if its
+# key is absent, rather than crashing the script.
+
+# --- data ---
+ccxt>=4.3            # Binance (and other exchange) OHLCV + order book, no key needed for public endpoints
+yfinance>=0.2.40      # Yahoo Finance OHLCV for forex pairs, no key needed
+requests>=2.31         # CoinGecko (BTC dominance), Glassnode, Alpha Vantage CPI, generic HTTP
+fredapi>=0.5.2          # FRED macro series — needs a free FRED_API_KEY
+# Alpha Vantage's CPI series (ALPHA_VANTAGE_KEY) is called directly via
+# `requests` — the `alpha_vantage` PyPI package wraps time-series/FX/
+# crypto/technical-indicator endpoints, not economic indicators, so it
+# isn't actually needed here despite being named in the original brief.
+websocket-client>=1.8      # imported for completeness / future streaming order-flow; the
+                            # shipped order-flow fetcher uses a REST depth snapshot instead
+                            # (see README "Design notes" for why)
+
+# --- features / model ---
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4       # mutual_info_classif (feature selection), metrics
+ta>=0.11                # technical-analysis indicator library (RSI/MACD/BB/ATR/ADX/... )
+lightgbm>=4.3
+hyperopt>=0.2.7
+
+# --- persistence ---
+supabase>=2.5            # Supabase REST client (primary storage backend)
+psycopg2-binary>=2.9        # optional: direct Postgres connection for one-time schema creation
+                            # (only used if SUPABASE_DB_URL is set — see schema.sql)
+python-dotenv>=1.0

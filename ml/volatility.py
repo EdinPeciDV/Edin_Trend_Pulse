@@ -133,8 +133,14 @@ def fit_har_rv(close, short=48, medium=288, long=1440, holdout_frac=0.2):
     the rest of the pipeline, at a scale appropriate for a diagnostic
     regression rather than the full purged walk-forward harness.
 
-    Returns a dict: {coef, intercept, qlike, sigma: full aligned sigma_t
-    series (sqrt of the fitted value, floored at a tiny epsilon), windows}.
+    Returns a dict: {coef, intercept, qlike, sigma, windows}. `sigma` is
+    scaled to a PER-BAR standard deviation (fitted/forecast realised
+    variance divided by `short` before the square root), matching the
+    units build_labels()'s own internal EWMA sigma_t uses — NOT the raw
+    sqrt(fitted realised variance), which is a `short`-bar CUMULATIVE
+    volatility and would be ~sqrt(short)x too large to use directly as
+    sigma_override (barriers would come out that many times too wide,
+    and almost every label would time out instead of touching a barrier).
     """
     X, y, valid = har_rv_design(close, short, medium, long)
     idx = np.where(valid)[0]
@@ -158,7 +164,8 @@ def fit_har_rv(close, short=48, medium=288, long=1440, holdout_frac=0.2):
     qlike = qlike_loss(y[test_idx], pred_test) if len(test_idx) else float("nan")
 
     fitted_all = intercept + X @ betas
-    sigma = np.sqrt(np.maximum(np.nan_to_num(fitted_all, nan=0.0), 1e-14))
+    per_bar_variance = np.nan_to_num(fitted_all, nan=0.0) / short
+    sigma = np.sqrt(np.maximum(per_bar_variance, 1e-14))
     sigma[~valid] = np.nan
 
     return {

@@ -25,12 +25,28 @@ create table if not exists public.profiles (
   username      text unique,
   risk_tolerance text not null default 'conservative'
                  check (risk_tolerance in ('aggressive', 'conservative')),
+  plan          text not null default 'free'
+                 constraint profiles_plan_check check (plan in ('free', 'basic', 'pro')),
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
 
 comment on table public.profiles is
-  'User preferences. risk_tolerance drives the Aggressive/Conservative strategy toggle.';
+  'User preferences. risk_tolerance drives the Aggressive/Conservative strategy toggle. plan drives paid-feature gating.';
+
+-- Adds `plan` to a profiles table that already existed before this
+-- column was introduced. A no-op on a fresh install (the CREATE TABLE
+-- above already has it) — this is what makes re-running the whole file
+-- safe against an existing project.
+alter table public.profiles add column if not exists plan text not null default 'free';
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'profiles_plan_check') then
+    alter table public.profiles
+      add constraint profiles_plan_check check (plan in ('free', 'basic', 'pro'));
+  end if;
+end $$;
 
 alter table public.profiles enable row level security;
 
@@ -49,6 +65,34 @@ create policy "profiles: update own"
   on public.profiles for update
   using (auth.uid() = id)
   with check (auth.uid() = id);
+
+-- "profiles: update own" is a ROW-level policy — it does not, and
+-- cannot by itself, stop a signed-in user from updating THEIR OWN
+-- `plan` column via the anon key (e.g. from devtools). Without the
+-- guard below, `supabase.from('profiles').update({ plan: 'pro' })`
+-- would succeed for anyone, for free. Only the service role (used
+-- exclusively by netlify/functions/webhook.js, after verifying a real
+-- Paddle payment) may change `plan`; every other update path has the
+-- column silently reverted to its previous value.
+create or replace function public.prevent_client_plan_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.plan is distinct from old.plan and auth.role() <> 'service_role' then
+    raise warning 'profiles.plan change blocked for %: role % is not service_role', old.id, auth.role();
+    new.plan := old.plan;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_profiles_plan_guard on public.profiles;
+create trigger on_profiles_plan_guard
+  before update on public.profiles
+  for each row execute function public.prevent_client_plan_change();
 
 -- Auto-create a profile row whenever a user signs up.
 create or replace function public.handle_new_user()
