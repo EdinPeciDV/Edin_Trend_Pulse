@@ -1,15 +1,23 @@
 /**
  * netlify/functions/fetch-market-data.js
  * -------------------------------------------------------------------
- * INGEST. For every registered instrument:
+ * INGEST. For every instrument in the requested asset class:
  *   1. pull ~200 five-minute candles from the upstream API
  *   2. compute RSI, SMA, Bollinger Bands, VWAP, realised volatility
  *   3. derive the Up/Down/Neutral signal
  *   4. upsert one row into market_snapshots
  *
+ * ?class=crypto|forex|all (default all) selects which instruments run.
+ * schedule-task.js uses this to poll crypto every 5 minutes and forex
+ * every 20 — see that file for why. Crypto (Binance) is fetched serially,
+ * one call per instrument; forex (Twelve Data) is always fetched as ONE
+ * batched request for every forex instrument in the run, to respect the
+ * free tier's 8 requests/minute cap — see fetchTwelveDataBatchCandles().
+ *
  * Invoked by:
- *   - schedule-task.js every 5 minutes (the normal path)
- *   - manually: GET /api/fetch-market-data (handy while developing)
+ *   - schedule-task.js on its cron tick (the normal path)
+ *   - manually: GET /api/fetch-market-data (handy while developing;
+ *     defaults to class=all, i.e. everything at once)
  *
  * Uses the SERVICE ROLE key, so it bypasses RLS. This key must never be
  * exposed to the browser — it lives only in Netlify env vars and is only
@@ -18,7 +26,11 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import { INSTRUMENTS, fetchCandles } from '../../shared/marketSources.js';
+import {
+  INSTRUMENTS,
+  fetchCandles,
+  fetchTwelveDataBatchCandles,
+} from '../../shared/marketSources.js';
 import {
   sma,
   rsi,
@@ -59,16 +71,29 @@ function getAdminClient() {
   });
 }
 
+/* -------------------------- Asset class ------------------------ */
+
+const VALID_CLASSES = ['crypto', 'forex', 'all'];
+
+function resolveAssetClass(params) {
+  const raw = (params?.class || 'all').toLowerCase();
+  return VALID_CLASSES.includes(raw) ? raw : 'all';
+}
+
+function instrumentsForClass(assetClass) {
+  if (assetClass === 'all') return INSTRUMENTS;
+  return INSTRUMENTS.filter((i) => i.kind === assetClass);
+}
+
 /* --------------------- Per-instrument work -------------------- */
 
 /**
- * Build one snapshot row from live candles.
+ * Build one snapshot row from already-fetched candles.
  * Snapshots are stored using the CONSERVATIVE profile so there is a
  * single canonical history; the aggressive view is recomputed on read
  * in get-analysis.js from the same candles.
  */
-async function buildSnapshot(instrument) {
-  const candles = await fetchCandles(instrument, 200);
+async function buildSnapshot(instrument, candles) {
   if (candles.length < 60) {
     throw new Error(
       `Only ${candles.length} candles for ${instrument.symbol} — need 60+ for a 50-period SMA.`
@@ -139,14 +164,17 @@ export async function handler(event) {
     return json(500, { error: err.message });
   }
 
+  const assetClass = resolveAssetClass(event.queryStringParameters);
+  const instruments = instrumentsForClass(assetClass);
+  const cryptoInstruments = instruments.filter((i) => i.kind === 'crypto');
+  const forexInstruments = instruments.filter((i) => i.kind === 'forex');
+
   const results = [];
   const rows = [];
 
-  // Serialised, not parallel: Twelve Data's free tier allows only
-  // 8 requests/minute, and parallel bursts trip its rate limiter.
-  for (const instrument of INSTRUMENTS) {
+  const recordSnapshot = async (instrument, candles) => {
     try {
-      const { row, meta } = await buildSnapshot(instrument);
+      const { row, meta } = await buildSnapshot(instrument, candles);
       rows.push(row);
       results.push({
         symbol: instrument.symbol,
@@ -162,6 +190,44 @@ export async function handler(event) {
       // One bad instrument must not sink the whole run.
       console.error(`[fetch-market-data] ${instrument.symbol} failed:`, err.message);
       results.push({ symbol: instrument.symbol, ok: false, error: err.message });
+    }
+  };
+
+  // Crypto: serial, one Binance call per instrument. No meaningful rate
+  // limit on Binance's public REST, so this stays simple and fast.
+  for (const instrument of cryptoInstruments) {
+    try {
+      const candles = await fetchCandles(instrument, 200);
+      await recordSnapshot(instrument, candles);
+    } catch (err) {
+      console.error(`[fetch-market-data] ${instrument.symbol} failed:`, err.message);
+      results.push({ symbol: instrument.symbol, ok: false, error: err.message });
+    }
+  }
+
+  // Forex: ONE batched Twelve Data call for every forex instrument in
+  // this run — never one call per pair. See fetchTwelveDataBatchCandles.
+  if (forexInstruments.length > 0) {
+    let batch = {};
+    try {
+      batch = await fetchTwelveDataBatchCandles(forexInstruments, '5min', 200);
+    } catch (err) {
+      // The whole batch request failed (e.g. network, auth, HTTP error) —
+      // every forex instrument in this run failed with it.
+      console.error('[fetch-market-data] forex batch fetch failed:', err.message);
+      for (const instrument of forexInstruments) {
+        results.push({ symbol: instrument.symbol, ok: false, error: err.message });
+      }
+    }
+    for (const instrument of forexInstruments) {
+      const candlesOrErr = batch[instrument.symbol];
+      if (candlesOrErr === undefined) continue; // already recorded above
+      if (candlesOrErr instanceof Error) {
+        console.error(`[fetch-market-data] ${instrument.symbol} failed:`, candlesOrErr.message);
+        results.push({ symbol: instrument.symbol, ok: false, error: candlesOrErr.message });
+        continue;
+      }
+      await recordSnapshot(instrument, candlesOrErr);
     }
   }
 
@@ -184,8 +250,9 @@ export async function handler(event) {
 
   return json(200, {
     ok: true,
+    assetClass,
     written: rows.length,
-    attempted: INSTRUMENTS.length,
+    attempted: instruments.length,
     durationMs: Date.now() - startedAt,
     results,
   });

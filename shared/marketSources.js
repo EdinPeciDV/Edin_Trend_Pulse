@@ -19,13 +19,148 @@
 /* ------------------------------------------------------------------ */
 
 export const INSTRUMENTS = [
-  // --- Crypto (Binance) ---
-  { symbol: 'BTC/USDT', kind: 'crypto', source: 'binance', sourceSymbol: 'BTCUSDT', name: 'Bitcoin' },
-  { symbol: 'ETH/USDT', kind: 'crypto', source: 'binance', sourceSymbol: 'ETHUSDT', name: 'Ethereum' },
-  { symbol: 'SOL/USDT', kind: 'crypto', source: 'binance', sourceSymbol: 'SOLUSDT', name: 'Solana' },
+  // --- Crypto (Binance), USDT pairs ---
+  {
+    symbol: "BTC/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "BTCUSDT",
+    name: "Bitcoin",
+  },
+  {
+    symbol: "ETH/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "ETHUSDT",
+    name: "Ethereum",
+  },
+  {
+    symbol: "SOL/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "SOLUSDT",
+    name: "Solana",
+  },
+  {
+    symbol: "XRP/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "XRPUSDT",
+    name: "XRP",
+  },
+  {
+    symbol: "ADA/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "ADAUSDT",
+    name: "Cardano",
+  },
+  {
+    symbol: "DOGE/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "DOGEUSDT",
+    name: "Dogecoin",
+  },
+  {
+    symbol: "AVAX/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "AVAXUSDT",
+    name: "Avalanche",
+  },
+  {
+    symbol: "LINK/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "LINKUSDT",
+    name: "Chainlink",
+  },
+  {
+    symbol: "LTC/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "LTCUSDT",
+    name: "Litecoin",
+  },
+  {
+    symbol: "DOT/USDT",
+    kind: "crypto",
+    source: "binance",
+    sourceSymbol: "DOTUSDT",
+    name: "Polkadot",
+  },
   // --- Forex (Twelve Data) ---
-  { symbol: 'EUR/USD', kind: 'forex', source: 'twelvedata', sourceSymbol: 'EUR/USD', name: 'Euro / US Dollar' },
-  { symbol: 'GBP/JPY', kind: 'forex', source: 'twelvedata', sourceSymbol: 'GBP/JPY', name: 'Pound / Yen' },
+  {
+    symbol: "EUR/USD",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "EUR/USD",
+    name: "Euro / US Dollar",
+  },
+  {
+    symbol: "GBP/JPY",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "GBP/JPY",
+    name: "Pound / Yen",
+  },
+  {
+    symbol: "USD/JPY",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "USD/JPY",
+    name: "US Dollar / Yen",
+  },
+  {
+    symbol: "GBP/USD",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "GBP/USD",
+    name: "Pound / US Dollar",
+  },
+  {
+    symbol: "AUD/USD",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "AUD/USD",
+    name: "Australian Dollar / US Dollar",
+  },
+  {
+    symbol: "USD/CAD",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "USD/CAD",
+    name: "US Dollar / Canadian Dollar",
+  },
+  {
+    symbol: "USD/CHF",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "USD/CHF",
+    name: "US Dollar / Swiss Franc",
+  },
+  {
+    symbol: "EUR/JPY",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "EUR/JPY",
+    name: "Euro / Yen",
+  },
+  {
+    symbol: "EUR/GBP",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "EUR/GBP",
+    name: "Euro / Pound",
+  },
+  {
+    symbol: "NZD/USD",
+    kind: "forex",
+    source: "twelvedata",
+    sourceSymbol: "NZD/USD",
+    name: "New Zealand Dollar / US Dollar",
+  },
 ];
 
 export function findInstrument(symbol) {
@@ -37,13 +172,22 @@ export function findInstrument(symbol) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Binance host. NOTE: api.binance.com returns HTTP 451 from US-based IPs,
- * and Netlify's build/runtime region may well be US. If you see 451s in
- * the function logs, set BINANCE_HOST=api.binance.us in Netlify and use
- * the *USD pairs (BTCUSD not BTCUSDT). Alternatives that work globally
- * include api.kraken.com and api.coinbase.com.
+ * Binance host. api.binance.com returns HTTP 451 from US-based IPs, and
+ * Netlify's runtime region is US — so production ingest hits 451 on every
+ * crypto pair while local dev (non-US IP) works fine. api.binance.us
+ * mirrors the same /api/v3/klines shape and accepts the same *USDT
+ * symbols, so on a 451 we retry once against it before giving up.
  */
-const BINANCE_HOST = process.env.BINANCE_HOST || 'api.binance.com';
+const BINANCE_HOST = process.env.BINANCE_HOST || "api.binance.com";
+const BINANCE_FALLBACK_HOST = "api.binance.us";
+
+function buildKlinesUrl(host, sourceSymbol, interval, limit) {
+  return (
+    `https://${host}/api/v3/klines` +
+    `?symbol=${encodeURIComponent(sourceSymbol)}` +
+    `&interval=${interval}&limit=${limit}`
+  );
+}
 
 /**
  * Fetch klines (candles) from Binance.
@@ -51,30 +195,45 @@ const BINANCE_HOST = process.env.BINANCE_HOST || 'api.binance.com';
  * @param {string} interval     e.g. '5m'
  * @param {number} limit        max 1000
  */
-export async function fetchBinanceCandles(sourceSymbol, interval = '5m', limit = 200) {
-  const url =
-    `https://${BINANCE_HOST}/api/v3/klines` +
-    `?symbol=${encodeURIComponent(sourceSymbol)}` +
-    `&interval=${interval}&limit=${limit}`;
+export async function fetchBinanceCandles(
+  sourceSymbol,
+  interval = "5m",
+  limit = 200,
+) {
+  let res = await fetch(
+    buildKlinesUrl(BINANCE_HOST, sourceSymbol, interval, limit),
+    {
+      headers: { Accept: "application/json" },
+    },
+  );
 
-  const res = await fetch(url, {
-    headers: { Accept: 'application/json' },
-  });
+  if (res.status === 451 && BINANCE_HOST !== BINANCE_FALLBACK_HOST) {
+    res = await fetch(
+      buildKlinesUrl(BINANCE_FALLBACK_HOST, sourceSymbol, interval, limit),
+      {
+        headers: { Accept: "application/json" },
+      },
+    );
+  }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
+    const body = await res.text().catch(() => "");
     if (res.status === 451) {
       throw new Error(
-        `Binance returned 451 (region blocked) for ${sourceSymbol}. ` +
-          `Set BINANCE_HOST=api.binance.us and use *USD pairs, or switch source.`
+        `Binance returned 451 (region blocked) for ${sourceSymbol}, and the ` +
+          `api.binance.us fallback also failed. ${body.slice(0, 200)}`,
       );
     }
-    throw new Error(`Binance ${res.status} for ${sourceSymbol}: ${body.slice(0, 200)}`);
+    throw new Error(
+      `Binance ${res.status} for ${sourceSymbol}: ${body.slice(0, 200)}`,
+    );
   }
 
   const raw = await res.json();
   if (!Array.isArray(raw)) {
-    throw new Error(`Binance returned an unexpected payload for ${sourceSymbol}`);
+    throw new Error(
+      `Binance returned an unexpected payload for ${sourceSymbol}`,
+    );
   }
 
   // Kline array layout:
@@ -94,48 +253,42 @@ export async function fetchBinanceCandles(sourceSymbol, interval = '5m', limit =
 /* ------------------------------------------------------------------ */
 
 /**
- * Fetch time series from Twelve Data.
- *
- * Free tier: 8 requests/minute, 800/day. Two FX pairs polled every
- * 5 minutes is 576 requests/day — inside the daily cap, but you have
- * no headroom for manual refreshes, so the ingest function serialises
- * FX requests and tolerates individual failures.
+ * Free tier: 8 requests/minute, 800 credits/day. Credits are charged per
+ * SYMBOL, not per HTTP call — a batched request for 10 symbols still
+ * costs 10 credits, but it's one request instead of ten, which is what
+ * actually matters for the 8 req/min cap. With 10 FX pairs polled every
+ * 20 minutes (72 ticks/day), that's 72 x 10 = 720 credits/day — inside
+ * the daily cap, with ~80 credits of headroom for manual/local runs.
  */
-export async function fetchTwelveDataCandles(sourceSymbol, interval = '5min', outputsize = 200) {
+function requireTwelveDataKey() {
   const apiKey = process.env.TWELVE_DATA_API_KEY;
   if (!apiKey) {
     throw new Error(
-      'TWELVE_DATA_API_KEY is not set — forex ingest cannot run. ' +
-        'Add it in Netlify › Site configuration › Environment variables.'
+      "TWELVE_DATA_API_KEY is not set — forex ingest cannot run. " +
+        "Add it in Netlify › Site configuration › Environment variables.",
     );
   }
+  return apiKey;
+}
 
-  const url =
-    'https://api.twelvedata.com/time_series' +
-    `?symbol=${encodeURIComponent(sourceSymbol)}` +
-    `&interval=${interval}&outputsize=${outputsize}` +
-    `&order=ASC&apikey=${apiKey}`;
-
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!res.ok) {
-    throw new Error(`Twelve Data HTTP ${res.status} for ${sourceSymbol}`);
+/** Normalise one Twelve Data time_series response object into candles. */
+function parseTwelveDataSeries(entry, sourceSymbol) {
+  if (!entry) {
+    throw new Error(`Twelve Data returned no data for ${sourceSymbol}`);
   }
-
-  const json = await res.json();
-
   // Twelve Data signals errors in the body with status:'error', HTTP 200.
-  if (json.status === 'error') {
+  if (entry.status === "error") {
     throw new Error(
-      `Twelve Data error for ${sourceSymbol}: ${json.message || 'unknown'} ` +
-        `(code ${json.code || '?'})`
+      `Twelve Data error for ${sourceSymbol}: ${entry.message || "unknown"} ` +
+        `(code ${entry.code || "?"})`,
     );
   }
-  if (!Array.isArray(json.values)) {
+  if (!Array.isArray(entry.values)) {
     throw new Error(`Twelve Data returned no values for ${sourceSymbol}`);
   }
 
-  return json.values.map((v) => ({
-    openTime: new Date(v.datetime + 'Z').getTime(),
+  return entry.values.map((v) => ({
+    openTime: new Date(v.datetime + "Z").getTime(),
     open: Number(v.open),
     high: Number(v.high),
     low: Number(v.low),
@@ -143,6 +296,89 @@ export async function fetchTwelveDataCandles(sourceSymbol, interval = '5min', ou
     // Spot FX has no consolidated volume; Twelve Data returns 0 or omits it.
     volume: Number(v.volume) || 0,
   }));
+}
+
+/** Fetch time series for a single Twelve Data symbol. */
+export async function fetchTwelveDataCandles(
+  sourceSymbol,
+  interval = "5min",
+  outputsize = 200,
+) {
+  const apiKey = requireTwelveDataKey();
+
+  const url =
+    "https://api.twelvedata.com/time_series" +
+    `?symbol=${encodeURIComponent(sourceSymbol)}` +
+    `&interval=${interval}&outputsize=${outputsize}` +
+    `&order=ASC&apikey=${apiKey}`;
+
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    throw new Error(`Twelve Data HTTP ${res.status} for ${sourceSymbol}`);
+  }
+
+  const json = await res.json();
+  return parseTwelveDataSeries(json, sourceSymbol);
+}
+
+/**
+ * Fetch time series for MULTIPLE Twelve Data instruments in a single HTTP
+ * request (comma-separated `symbol=`), so N pairs cost N credits but only
+ * ONE call against the 8 requests/minute cap.
+ *
+ * Twelve Data's batch shape only appears when more than one symbol is
+ * requested: the top-level JSON is keyed by symbol, each value shaped
+ * like the single-symbol response. With exactly one symbol it falls back
+ * to the flat single-symbol shape, so that case is handled explicitly.
+ *
+ * Tolerates individual symbol failures — a bad/unsupported symbol in the
+ * batch must not sink candles for the rest. Returns a map from each
+ * instrument's registry `symbol` to either a candles array or an Error.
+ */
+export async function fetchTwelveDataBatchCandles(
+  instruments,
+  interval = "5min",
+  outputsize = 200,
+) {
+  const out = {};
+  if (!instruments || instruments.length === 0) return out;
+
+  const apiKey = requireTwelveDataKey();
+  const symbolList = instruments.map((i) => i.sourceSymbol).join(",");
+
+  const url =
+    "https://api.twelvedata.com/time_series" +
+    `?symbol=${encodeURIComponent(symbolList)}` +
+    `&interval=${interval}&outputsize=${outputsize}` +
+    `&order=ASC&apikey=${apiKey}`;
+
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    throw new Error(`Twelve Data HTTP ${res.status} for batch [${symbolList}]`);
+  }
+  const json = await res.json();
+
+  if (instruments.length === 1) {
+    const only = instruments[0];
+    try {
+      out[only.symbol] = parseTwelveDataSeries(json, only.sourceSymbol);
+    } catch (err) {
+      out[only.symbol] = err;
+    }
+    return out;
+  }
+
+  for (const instrument of instruments) {
+    try {
+      out[instrument.symbol] = parseTwelveDataSeries(
+        json[instrument.sourceSymbol],
+        instrument.sourceSymbol,
+      );
+    } catch (err) {
+      out[instrument.symbol] = err;
+    }
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -157,11 +393,11 @@ export async function fetchTwelveDataCandles(sourceSymbol, interval = '5min', ou
  * forward-filled onto the candle grid — a value is "current" until the
  * next print, not interpolated toward one that hasn't happened yet.
  */
-const FUTURES_HOST = process.env.BINANCE_FUTURES_HOST || 'fapi.binance.com';
+const FUTURES_HOST = process.env.BINANCE_FUTURES_HOST || "fapi.binance.com";
 
 async function fetchFuturesJson(path) {
   const res = await fetch(`https://${FUTURES_HOST}${path}`, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: "application/json" },
   });
   if (!res.ok) {
     throw new Error(`Binance futures ${res.status} for ${path}`);
@@ -171,7 +407,7 @@ async function fetchFuturesJson(path) {
 
 async function fetchFundingRateHistory(sourceSymbol, limit = 200) {
   const rows = await fetchFuturesJson(
-    `/fapi/v1/fundingRate?symbol=${encodeURIComponent(sourceSymbol)}&limit=${limit}`
+    `/fapi/v1/fundingRate?symbol=${encodeURIComponent(sourceSymbol)}&limit=${limit}`,
   );
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error(`no funding rate data for ${sourceSymbol}`);
@@ -181,9 +417,15 @@ async function fetchFundingRateHistory(sourceSymbol, limit = 200) {
     .sort((a, b) => a.time - b.time);
 }
 
-async function fetchFuturesStatsSeries(sourceSymbol, path, valueKey, period = '5m', limit = 200) {
+async function fetchFuturesStatsSeries(
+  sourceSymbol,
+  path,
+  valueKey,
+  period = "5m",
+  limit = 200,
+) {
   const rows = await fetchFuturesJson(
-    `${path}?symbol=${encodeURIComponent(sourceSymbol)}&period=${period}&limit=${limit}`
+    `${path}?symbol=${encodeURIComponent(sourceSymbol)}&period=${period}&limit=${limit}`,
   );
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error(`no data from ${path} for ${sourceSymbol}`);
@@ -216,7 +458,7 @@ function alignToBars(events, targetTimes) {
  * because a missing derivatives feed must not take down the dashboard.
  */
 export async function fetchDerivativesContext(instrument, candles) {
-  if (instrument.kind !== 'crypto' || !candles?.length) return null;
+  if (instrument.kind !== "crypto" || !candles?.length) return null;
 
   const sourceSymbol = instrument.sourceSymbol; // e.g. 'BTCUSDT' — same base symbol on USDT-M futures
   const targetTimes = candles.map((c) => c.openTime);
@@ -224,22 +466,33 @@ export async function fetchDerivativesContext(instrument, candles) {
 
   const [funding, oi, topTrader] = await Promise.allSettled([
     fetchFundingRateHistory(sourceSymbol),
-    fetchFuturesStatsSeries(sourceSymbol, '/futures/data/openInterestHist', 'sumOpenInterest'),
-    fetchFuturesStatsSeries(sourceSymbol, '/futures/data/topLongShortPositionRatio', 'longShortRatio'),
+    fetchFuturesStatsSeries(
+      sourceSymbol,
+      "/futures/data/openInterestHist",
+      "sumOpenInterest",
+    ),
+    fetchFuturesStatsSeries(
+      sourceSymbol,
+      "/futures/data/topLongShortPositionRatio",
+      "longShortRatio",
+    ),
   ]);
 
   const pick = (settled, label) => {
-    if (settled.status !== 'fulfilled') {
-      console.error(`[marketSources] ${label} failed for ${sourceSymbol}:`, settled.reason?.message);
+    if (settled.status !== "fulfilled") {
+      console.error(
+        `[marketSources] ${label} failed for ${sourceSymbol}:`,
+        settled.reason?.message,
+      );
       return new Array(n).fill(null);
     }
     return alignToBars(settled.value, targetTimes);
   };
 
   return {
-    fundingRate: pick(funding, 'funding rate'),
-    openInterest: pick(oi, 'open interest'),
-    topTraderRatio: pick(topTrader, 'top-trader ratio'),
+    fundingRate: pick(funding, "funding rate"),
+    openInterest: pick(oi, "open interest"),
+    topTraderRatio: pick(topTrader, "top-trader ratio"),
   };
 }
 
@@ -253,10 +506,14 @@ export async function fetchDerivativesContext(instrument, candles) {
  */
 export async function fetchCandles(instrument, limit = 200) {
   let candles;
-  if (instrument.source === 'binance') {
-    candles = await fetchBinanceCandles(instrument.sourceSymbol, '5m', limit);
-  } else if (instrument.source === 'twelvedata') {
-    candles = await fetchTwelveDataCandles(instrument.sourceSymbol, '5min', limit);
+  if (instrument.source === "binance") {
+    candles = await fetchBinanceCandles(instrument.sourceSymbol, "5m", limit);
+  } else if (instrument.source === "twelvedata") {
+    candles = await fetchTwelveDataCandles(
+      instrument.sourceSymbol,
+      "5min",
+      limit,
+    );
   } else {
     throw new Error(`Unknown source "${instrument.source}"`);
   }

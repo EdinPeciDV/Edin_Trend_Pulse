@@ -18,31 +18,40 @@
  * -------------------------------------------------------------------
  */
 
+// Tiers are nested subsets by design: every symbol Free unlocks is also in
+// Basic, and every symbol Basic unlocks is also in Pro (which gets all 20
+// via symbols: null). Upgrading always ADDS pairs, never swaps them out.
+const FREE_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'EUR/USD', 'USD/JPY', 'GBP/USD'];
+const BASIC_SYMBOLS = [
+  'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'LINK/USDT',
+  'EUR/USD', 'USD/JPY', 'GBP/USD', 'GBP/JPY', 'AUD/USD', 'USD/CAD', 'USD/CHF', 'EUR/JPY',
+];
+
 export const PLAN_LIMITS = {
   free: {
     key: 'free',
     label: 'Free',
     priceLabel: '$0',
-    maxInstruments: 1,
+    maxInstruments: FREE_SYMBOLS.length, // 3 crypto + 3 forex
     historyDays: 1,
     // null symbols = "every instrument"; an explicit list = only these.
-    symbols: ['BTC/USDT'],
+    symbols: FREE_SYMBOLS,
     paddlePriceId: null,
   },
   basic: {
     key: 'basic',
     label: 'Basic',
     priceLabel: '$19/mo',
-    maxInstruments: 3,
+    maxInstruments: BASIC_SYMBOLS.length, // 8 crypto + 8 forex
     historyDays: 7,
-    symbols: ['BTC/USDT', 'ETH/USDT', 'EUR/USD'],
+    symbols: BASIC_SYMBOLS,
     paddlePriceId: import.meta.env.VITE_PADDLE_PRICE_ID_BASIC || null,
   },
   pro: {
     key: 'pro',
     label: 'Pro',
     priceLabel: '$49/mo',
-    maxInstruments: 5,
+    maxInstruments: 20, // every instrument — keep in sync with shared/marketSources.js INSTRUMENTS
     historyDays: 30,
     symbols: null,
     paddlePriceId: import.meta.env.VITE_PADDLE_PRICE_ID_PRO || null,

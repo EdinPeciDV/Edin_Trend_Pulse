@@ -1,13 +1,22 @@
 /**
  * netlify/functions/schedule-task.js
  * -------------------------------------------------------------------
- * The cron job. Runs every 5 minutes via Netlify Scheduled Functions
- * (declared both here with schedule() and in netlify.toml).
+ * The cron job. Fires every 5 minutes via Netlify Scheduled Functions
+ * (declared both here with schedule() and in netlify.toml), but not
+ * every tick does the same amount of work:
+ *
+ *   - CRYPTO ingests every tick (Binance has no meaningful rate limit).
+ *   - FOREX ingests only on ticks that land on a 20-minute boundary
+ *     (:00/:20/:40 UTC) — Twelve Data's free tier is 8 req/min and
+ *     800 credits/day, and 10 FX pairs batched every 20 minutes is
+ *     72 x 10 = 720 credits/day. Ingesting forex every 5 minutes like
+ *     crypto would be 4x that and blow the daily cap by lunchtime.
  *
  * Three jobs per tick:
- *   1. INGEST  — invoke the same logic as fetch-market-data
+ *   1. INGEST  — invoke the same logic as fetch-market-data, scoped to
+ *                whichever asset class(es) this tick covers
  *   2. LOG     — write the current signal into `predictions` so accuracy
- *                can be measured later
+ *                can be measured later, only for what was just ingested
  *   3. GRADE   — resolve predictions that are now old enough to score
  *
  * Scheduled functions cannot be triggered by HTTP in production; Netlify
@@ -18,16 +27,29 @@
  * passed. UP is correct if price rose by more than the dead band, DOWN
  * if it fell by more. NEUTRAL is correct if price stayed inside the band.
  * The dead band stops tiny noise from being scored as a win.
+ *
+ * Grading reads the current price from `latest_snapshots` (the ingest
+ * step already wrote it) instead of live-fetching upstream. A graded
+ * prediction is already >= GRADE_AFTER_MINUTES old, so being up to one
+ * ingest cycle stale (<=5min crypto, <=20min forex) doesn't matter — and
+ * it means grading spends zero extra Twelve Data credits, no matter how
+ * many predictions are pending.
  * -------------------------------------------------------------------
  */
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { handler as ingestHandler } from './fetch-market-data.js';
-import { INSTRUMENTS, fetchCandles } from '../../shared/marketSources.js';
+import { INSTRUMENTS } from '../../shared/marketSources.js';
 
 const GRADE_AFTER_MINUTES = 60; // how long a prediction gets to play out
 const DEAD_BAND_PCT = 0.15; // moves smaller than this count as "flat"
+const FOREX_INGEST_INTERVAL_MINUTES = 20;
+
+/** True on ticks that fall on a 20-minute UTC boundary: :00, :20, :40. */
+function isForexIngestTick(now = new Date()) {
+  return now.getUTCMinutes() % FOREX_INGEST_INTERVAL_MINUTES === 0;
+}
 
 function getAdminClient() {
   const url = process.env.SUPABASE_URL;
@@ -47,11 +69,16 @@ function getAdminClient() {
  * step just wrote. These are system-level predictions (user_id null);
  * per-user predictions are written by the frontend when a signed-in user
  * follows a symbol.
+ *
+ * `instruments` is scoped to whatever this tick actually ingested — not
+ * the full registry. Forex only ingests every 20 minutes now, so logging
+ * every 5-minute tick regardless would insert 4 duplicate PENDING rows
+ * off the same stale snapshot for every real forex signal.
  */
-async function logPredictions(supabase) {
+async function logPredictions(supabase, instruments) {
   const logged = [];
 
-  for (const instrument of INSTRUMENTS) {
+  for (const instrument of instruments) {
     const { data, error } = await supabase
       .from('market_snapshots')
       .select('symbol, price, signal, confidence, rsi, created_at')
@@ -103,18 +130,21 @@ async function gradePredictions(supabase) {
   }
   if (!pending || pending.length === 0) return { graded: 0 };
 
-  // One upstream fetch per distinct symbol, not per prediction.
+  // One Supabase read for every distinct symbol's latest snapshot — no
+  // upstream API calls. See the module comment for why this is safe.
   const symbols = [...new Set(pending.map((p) => p.symbol))];
   const priceBySymbol = {};
 
-  for (const symbol of symbols) {
-    const instrument = INSTRUMENTS.find((i) => i.symbol === symbol);
-    if (!instrument) continue;
-    try {
-      const candles = await fetchCandles(instrument, 5);
-      priceBySymbol[symbol] = candles[candles.length - 1].close;
-    } catch (err) {
-      console.error(`[schedule-task] grade fetch failed for ${symbol}:`, err.message);
+  const { data: latest, error: latestError } = await supabase
+    .from('latest_snapshots')
+    .select('symbol, price')
+    .in('symbol', symbols);
+
+  if (latestError) {
+    console.error('[schedule-task] latest_snapshots query failed:', latestError.message);
+  } else {
+    for (const row of latest || []) {
+      priceBySymbol[row.symbol] = row.price;
     }
   }
 
@@ -170,21 +200,44 @@ const run = async () => {
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
 
-  // 1. Ingest — reuse the exact same code path as the HTTP endpoint.
-  let ingest = null;
+  // 1. Ingest — crypto every tick, forex only on a 20-minute boundary.
+  // Reuses the exact same code path as the HTTP endpoint, scoped by class.
+  const forexTick = isForexIngestTick(new Date());
+  const ingestedInstruments = INSTRUMENTS.filter((i) => i.kind === 'crypto');
+
+  let cryptoIngest = null;
   try {
-    const res = await ingestHandler({ httpMethod: 'POST', queryStringParameters: {} });
-    ingest = JSON.parse(res.body);
-    console.log(`[schedule-task] ingest wrote ${ingest.written ?? 0} rows`);
+    const res = await ingestHandler({
+      httpMethod: 'POST',
+      queryStringParameters: { class: 'crypto' },
+    });
+    cryptoIngest = JSON.parse(res.body);
+    console.log(`[schedule-task] crypto ingest wrote ${cryptoIngest.written ?? 0} rows`);
   } catch (err) {
-    console.error('[schedule-task] ingest threw:', err.message);
-    ingest = { error: err.message };
+    console.error('[schedule-task] crypto ingest threw:', err.message);
+    cryptoIngest = { error: err.message };
   }
 
-  // 2. Log the fresh signals.
+  let forexIngest = null;
+  if (forexTick) {
+    try {
+      const res = await ingestHandler({
+        httpMethod: 'POST',
+        queryStringParameters: { class: 'forex' },
+      });
+      forexIngest = JSON.parse(res.body);
+      console.log(`[schedule-task] forex ingest wrote ${forexIngest.written ?? 0} rows`);
+      ingestedInstruments.push(...INSTRUMENTS.filter((i) => i.kind === 'forex'));
+    } catch (err) {
+      console.error('[schedule-task] forex ingest threw:', err.message);
+      forexIngest = { error: err.message };
+    }
+  }
+
+  // 2. Log the fresh signals — only for what was actually just ingested.
   let logged = [];
   try {
-    logged = await logPredictions(supabase);
+    logged = await logPredictions(supabase, ingestedInstruments);
     console.log(`[schedule-task] logged ${logged.length} predictions`);
   } catch (err) {
     console.error('[schedule-task] logging threw:', err.message);
@@ -203,7 +256,9 @@ const run = async () => {
     ok: true,
     ranAt: new Date().toISOString(),
     durationMs: Date.now() - startedAt,
-    ingest,
+    forexTick,
+    crypto: cryptoIngest,
+    forex: forexIngest,
     logged: logged.length,
     graded: grading.graded,
   };
