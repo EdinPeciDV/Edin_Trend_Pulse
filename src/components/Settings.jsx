@@ -11,6 +11,7 @@
  */
 
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { STRATEGY_PROFILES } from '../lib/helpers.js';
 import {
   signInWithEmail,
@@ -400,10 +401,11 @@ export default function Settings({ strategy, onStrategyChange, session, profile,
             not imply a profitable strategy.
           </p>
           <p className="text-ink-faint">
-            Nothing here is investment advice, and none of it is personalised to
-            your situation. Trading crypto and leveraged forex can lose you more
-            than you put in. Speak to a licensed financial adviser before risking
-            money you cannot afford to lose.
+            Read the full risk disclosure and liability terms in the{' '}
+            <Link to="/terms" className="text-amber hover:underline">
+              Terms &amp; Conditions
+            </Link>
+            .
           </p>
         </div>
       </section>

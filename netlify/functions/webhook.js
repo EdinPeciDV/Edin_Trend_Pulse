@@ -22,21 +22,32 @@
  *
  * Uses the SERVICE ROLE key, so it bypasses RLS — same as every other
  * function in netlify/functions/ that writes to Supabase.
+ *
+ * LIFETIME ACCOUNTS: profiles.is_lifetime is set by hand from /admin
+ * (netlify/functions/admin.js), never by this webhook. A cancel/pause
+ * event here must not downgrade one of those accounts, so downgrades
+ * check the flag first and skip if it's set.
  * -------------------------------------------------------------------
  */
 
-import crypto from 'node:crypto';
-import { createClient } from '@supabase/supabase-js';
+import crypto from "node:crypto";
+import { createClient } from "@supabase/supabase-js";
 
 function json(statusCode, body) {
-  return { statusCode, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  return {
+    statusCode,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
 }
 
 function getAdminClient() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 }
 
 /* ---------------------- Signature verification ------------------- */
@@ -54,7 +65,7 @@ function verifyPaddleSignature(rawBody, signatureHeader, secret) {
   if (!signatureHeader || !secret) return false;
 
   const parts = Object.fromEntries(
-    signatureHeader.split(';').map((p) => p.split('='))
+    signatureHeader.split(";").map((p) => p.split("=")),
   );
   const { ts, h1 } = parts;
   if (!ts || !h1) return false;
@@ -65,18 +76,21 @@ function verifyPaddleSignature(rawBody, signatureHeader, secret) {
   const ageSeconds = Math.abs(Date.now() / 1000 - Number(ts));
   if (!Number.isFinite(ageSeconds) || ageSeconds > 300) return false;
 
-  const expected = crypto.createHmac('sha256', secret).update(`${ts}:${rawBody}`).digest('hex');
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(`${ts}:${rawBody}`)
+    .digest("hex");
 
-  const a = Buffer.from(expected, 'hex');
-  const b = Buffer.from(h1, 'hex');
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(h1, "hex");
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 /* ---------------------------- Plan mapping ------------------------- */
 
 function priceToPlan(priceId) {
-  if (priceId && priceId === process.env.PADDLE_PRICE_ID_BASIC) return 'basic';
-  if (priceId && priceId === process.env.PADDLE_PRICE_ID_PRO) return 'pro';
+  if (priceId && priceId === process.env.PADDLE_PRICE_ID_BASIC) return "basic";
+  if (priceId && priceId === process.env.PADDLE_PRICE_ID_PRO) return "pro";
   return null;
 }
 
@@ -87,32 +101,40 @@ function planForSubscription(data) {
   return priceToPlan(data?.items?.[0]?.price?.id);
 }
 
-const UPGRADE_EVENTS = new Set(['subscription.created', 'subscription.activated', 'subscription.updated']);
-const DOWNGRADE_EVENTS = new Set(['subscription.canceled', 'subscription.paused']);
+const UPGRADE_EVENTS = new Set([
+  "subscription.created",
+  "subscription.activated",
+  "subscription.updated",
+]);
+const DOWNGRADE_EVENTS = new Set([
+  "subscription.canceled",
+  "subscription.paused",
+]);
 
 /* ------------------------------ Handler ---------------------------- */
 
 export async function handler(event) {
-  if (event.httpMethod !== 'POST') {
-    return json(405, { error: 'Method not allowed. Paddle sends POST.' });
+  if (event.httpMethod !== "POST") {
+    return json(405, { error: "Method not allowed. Paddle sends POST." });
   }
 
   const secret = process.env.PADDLE_WEBHOOK_SECRET;
   const rawBody = event.isBase64Encoded
-    ? Buffer.from(event.body || '', 'base64').toString('utf8')
-    : event.body || '';
+    ? Buffer.from(event.body || "", "base64").toString("utf8")
+    : event.body || "";
 
-  const signatureHeader = event.headers?.['paddle-signature'] || event.headers?.['Paddle-Signature'];
+  const signatureHeader =
+    event.headers?.["paddle-signature"] || event.headers?.["Paddle-Signature"];
   if (!verifyPaddleSignature(rawBody, signatureHeader, secret)) {
-    console.error('[webhook] signature verification failed');
-    return json(401, { error: 'Invalid signature.' });
+    console.error("[webhook] signature verification failed");
+    return json(401, { error: "Invalid signature." });
   }
 
   let payload;
   try {
     payload = JSON.parse(rawBody);
   } catch {
-    return json(400, { error: 'Malformed JSON body.' });
+    return json(400, { error: "Malformed JSON body." });
   }
 
   const eventType = payload.event_type;
@@ -120,12 +142,18 @@ export async function handler(event) {
   const userId = data.custom_data?.supabase_user_id;
 
   if (!userId) {
-    console.warn(`[webhook] ${eventType}: no custom_data.supabase_user_id — skipped`, {
-      subscription_id: data.id,
-    });
+    console.warn(
+      `[webhook] ${eventType}: no custom_data.supabase_user_id — skipped`,
+      {
+        subscription_id: data.id,
+      },
+    );
     // 200, not an error: Paddle retries non-2xx responses, and retrying
     // will never make a missing user id appear.
-    return json(200, { ok: true, skipped: 'no supabase_user_id in custom_data' });
+    return json(200, {
+      ok: true,
+      skipped: "no supabase_user_id in custom_data",
+    });
   }
 
   let newPlan;
@@ -136,10 +164,10 @@ export async function handler(event) {
         price_id: data.items?.[0]?.price?.id,
         user_id: userId,
       });
-      return json(200, { ok: true, skipped: 'unrecognised price id' });
+      return json(200, { ok: true, skipped: "unrecognised price id" });
     }
   } else if (DOWNGRADE_EVENTS.has(eventType)) {
-    newPlan = 'free';
+    newPlan = "free";
   } else {
     // transaction.*, customer.*, and everything else: acknowledged, but
     // plan changes only ever come from the subscription lifecycle
@@ -149,14 +177,40 @@ export async function handler(event) {
 
   const supabase = getAdminClient();
   if (!supabase) {
-    console.error('[webhook] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured');
-    return json(500, { error: 'Storage not configured.' });
+    console.error(
+      "[webhook] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured",
+    );
+    return json(500, { error: "Storage not configured." });
+  }
+
+  // Lifetime accounts are granted by hand from /admin, never through
+  // Paddle — a cancel/pause on some unrelated subscription must never
+  // knock them back to free.
+  if (DOWNGRADE_EVENTS.has(eventType)) {
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("is_lifetime")
+      .eq("id", userId)
+      .maybeSingle();
+    if (profileError) {
+      console.error(
+        `[webhook] lifetime check failed for ${userId}:`,
+        profileError.message,
+      );
+      return json(500, { error: profileError.message });
+    }
+    if (profile?.is_lifetime) {
+      console.log(
+        `[webhook] ${eventType}: user ${userId} is lifetime — downgrade skipped`,
+      );
+      return json(200, { ok: true, skipped: "lifetime account" });
+    }
   }
 
   const { error } = await supabase
-    .from('profiles')
+    .from("profiles")
     .update({ plan: newPlan, updated_at: new Date().toISOString() })
-    .eq('id', userId);
+    .eq("id", userId);
 
   if (error) {
     console.error(`[webhook] plan update failed for ${userId}:`, error.message);

@@ -6,15 +6,21 @@
  * every tick does the same amount of work:
  *
  *   - CRYPTO ingests every tick (Binance has no meaningful rate limit).
- *   - FOREX ingests only on ticks that land on a 20-minute boundary
- *     (:00/:20/:40 UTC) — Twelve Data's free tier is 8 req/min and
- *     800 credits/day, and 10 FX pairs batched every 20 minutes is
- *     72 x 10 = 720 credits/day. Ingesting forex every 5 minutes like
- *     crypto would be 4x that and blow the daily cap by lunchtime.
+ *   - FOREX ingests only on 10-minute boundaries (:00/:10/:20/... UTC),
+ *     and each such tick covers only HALF the forex registry, alternating
+ *     which half. Twelve Data's free tier is 8 API CREDITS/MINUTE, not
+ *     8 requests/minute — confirmed live, a single call for all 10 forex
+ *     pairs 429s instantly regardless of batching, because each symbol
+ *     costs a credit. Splitting into two 5-symbol groups keeps every
+ *     single call at 5 credits, safely under 8. Each symbol's group comes
+ *     up every other 10-minute tick, so it still refreshes every 20
+ *     minutes overall: 144 ticks/day x 5 credits = 720 credits/day —
+ *     same daily total as the original "10 pairs every 20 min" plan,
+ *     just split into per-minute-safe chunks.
  *
  * Three jobs per tick:
  *   1. INGEST  — invoke the same logic as fetch-market-data, scoped to
- *                whichever asset class(es) this tick covers
+ *                whichever asset class/group this tick covers
  *   2. LOG     — write the current signal into `predictions` so accuracy
  *                can be measured later, only for what was just ingested
  *   3. GRADE   — resolve predictions that are now old enough to score
@@ -34,6 +40,13 @@
  * ingest cycle stale (<=5min crypto, <=20min forex) doesn't matter — and
  * it means grading spends zero extra Twelve Data credits, no matter how
  * many predictions are pending.
+ *
+ * This function (via fetch-market-data.js) is the ONLY caller of Twelve
+ * Data anywhere in the app — get-analysis.js reads forex candles from
+ * the forex_candle_cache table fetch-market-data.js writes, instead of
+ * calling Twelve Data itself. See migrations.sql section 8 for why that
+ * matters: two independent uncoordinated callers can't safely share one
+ * 8-credit/minute budget.
  * -------------------------------------------------------------------
  */
 
@@ -44,11 +57,29 @@ import { INSTRUMENTS } from '../../shared/marketSources.js';
 
 const GRADE_AFTER_MINUTES = 60; // how long a prediction gets to play out
 const DEAD_BAND_PCT = 0.15; // moves smaller than this count as "flat"
-const FOREX_INGEST_INTERVAL_MINUTES = 20;
+const FOREX_INGEST_INTERVAL_MINUTES = 10;
+const FOREX_GROUP_SIZE = 5; // must match fetch-market-data.js's FOREX_GROUP_SIZE
 
-/** True on ticks that fall on a 20-minute UTC boundary: :00, :20, :40. */
-function isForexIngestTick(now = new Date()) {
-  return now.getUTCMinutes() % FOREX_INGEST_INTERVAL_MINUTES === 0;
+function forexGroups() {
+  const forex = INSTRUMENTS.filter((i) => i.kind === 'forex');
+  const groups = [];
+  for (let i = 0; i < forex.length; i += FOREX_GROUP_SIZE) {
+    groups.push(forex.slice(i, i + FOREX_GROUP_SIZE));
+  }
+  return groups;
+}
+
+/**
+ * Which forex group this tick should ingest, or null on a tick that
+ * isn't a forex boundary at all. Alternates deterministically by time of
+ * day, so it needs no persisted state and always agrees with itself.
+ */
+function forexTickGroupIndex(now = new Date()) {
+  const minutesSinceMidnight = now.getUTCHours() * 60 + now.getUTCMinutes();
+  if (minutesSinceMidnight % FOREX_INGEST_INTERVAL_MINUTES !== 0) return null;
+  const tickIndex = minutesSinceMidnight / FOREX_INGEST_INTERVAL_MINUTES;
+  const groupCount = forexGroups().length;
+  return tickIndex % groupCount;
 }
 
 function getAdminClient() {
@@ -200,9 +231,9 @@ const run = async () => {
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
 
-  // 1. Ingest — crypto every tick, forex only on a 20-minute boundary.
+  // 1. Ingest — crypto every tick, forex one group on a 10-minute boundary.
   // Reuses the exact same code path as the HTTP endpoint, scoped by class.
-  const forexTick = isForexIngestTick(new Date());
+  const forexGroupIdx = forexTickGroupIndex(new Date());
   const ingestedInstruments = INSTRUMENTS.filter((i) => i.kind === 'crypto');
 
   let cryptoIngest = null;
@@ -219,15 +250,17 @@ const run = async () => {
   }
 
   let forexIngest = null;
-  if (forexTick) {
+  if (forexGroupIdx != null) {
     try {
       const res = await ingestHandler({
         httpMethod: 'POST',
-        queryStringParameters: { class: 'forex' },
+        queryStringParameters: { class: 'forex', group: String(forexGroupIdx) },
       });
       forexIngest = JSON.parse(res.body);
-      console.log(`[schedule-task] forex ingest wrote ${forexIngest.written ?? 0} rows`);
-      ingestedInstruments.push(...INSTRUMENTS.filter((i) => i.kind === 'forex'));
+      console.log(
+        `[schedule-task] forex ingest (group ${forexGroupIdx}) wrote ${forexIngest.written ?? 0} rows`
+      );
+      ingestedInstruments.push(...forexGroups()[forexGroupIdx]);
     } catch (err) {
       console.error('[schedule-task] forex ingest threw:', err.message);
       forexIngest = { error: err.message };
@@ -256,7 +289,7 @@ const run = async () => {
     ok: true,
     ranAt: new Date().toISOString(),
     durationMs: Date.now() - startedAt,
-    forexTick,
+    forexGroup: forexGroupIdx,
     crypto: cryptoIngest,
     forex: forexIngest,
     logged: logged.length,

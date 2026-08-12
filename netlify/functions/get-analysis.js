@@ -28,7 +28,6 @@ import {
   findInstrument,
   fetchCandles,
   fetchDerivativesContext,
-  fetchTwelveDataBatchCandles,
 } from '../../shared/marketSources.js';
 import rawModel from '../../shared/model.json';
 import { loadModel, predictFromCandles, combineSignals } from '../../shared/mlModel.js';
@@ -129,67 +128,35 @@ async function fetchCryptoCandlesBundle(alreadyFetched = {}) {
 }
 
 /**
- * Forex candles for the dashboard/detail read path, batched + cached.
+ * Forex candles for the read path — read from forex_candle_cache, NEVER
+ * fetched live from Twelve Data here.
  *
  * Binance has no meaningful rate limit, so crypto refetches live on every
- * request above. Twelve Data does not: it's 8 req/min and 800 credits/day,
- * and this function can be called on every /api/get-analysis poll (every
- * 60s per open browser tab). Fetching all 10 FX pairs individually per
- * request would burst well past 8 req/min on the first request alone.
- *
- * Two mitigations, both required:
- *   1. Always fetch via ONE batched Twelve Data call, same as ingest.
- *   2. Cache that batch in module scope for FOREX_CACHE_TTL_MS, aligned
- *      to the scheduled ingest's own 20-minute forex cadence (see
- *      schedule-task.js) — there's no fresher forex data to have anyway
- *      between ingest ticks.
- *
- * The cache is best-effort: a serverless cold start clears it, and under
- * concurrent cold instances each gets its own. It still turns the
- * worst case from "N individual calls per request" into "1 batched call
- * per warm instance per cache window," which is the difference between
- * blowing the daily credit cap in minutes versus staying inside it under
- * normal traffic. If Twelve Data's dashboard shows sustained throttling
- * despite this, the durable fix is to stop live-fetching forex on read
- * and serve it from persisted candles instead — a bigger change, flag it
- * rather than silently re-architecting this path.
+ * request above. Twelve Data does not: its free tier is 8 API CREDITS
+ * PER MINUTE (confirmed live via a 429 — batching 10 symbols into one
+ * call still costs 10 credits, so it 429s instantly regardless of request
+ * count). This function is called on every /api/get-analysis poll — every
+ * 60s per open browser tab — and fetch-market-data.js's scheduled ingest
+ * is already spending its own share of that per-minute budget on its own
+ * clock. Two independent, uncoordinated callers (a cron tick and an
+ * opportunistic dashboard poll) cannot safely share one 8-credit budget
+ * without an occasional collision, so this reads what the ingest already
+ * fetched and cached in Supabase instead of calling Twelve Data itself.
+ * See migrations.sql section 8 and fetch-market-data.js for the write side.
  */
-const FOREX_CACHE_TTL_MS = 20 * 60 * 1000;
-let forexCandlesCache = { bySymbol: null, fetchedAt: 0 };
+async function fetchForexCandles(supabase, symbol) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('forex_candle_cache')
+    .select('candles')
+    .eq('symbol', symbol)
+    .maybeSingle();
 
-async function fetchForexCandlesBundle() {
-  const now = Date.now();
-  if (forexCandlesCache.bySymbol && now - forexCandlesCache.fetchedAt < FOREX_CACHE_TTL_MS) {
-    return forexCandlesCache.bySymbol;
+  if (error) {
+    console.error(`[get-analysis] forex candle cache read failed for ${symbol}:`, error.message);
+    return null;
   }
-
-  const forexInstruments = INSTRUMENTS.filter((i) => i.kind === 'forex');
-  let batch = {};
-  try {
-    batch = await fetchTwelveDataBatchCandles(forexInstruments, '5min', 300);
-  } catch (err) {
-    // The whole batch request failed (network, auth, HTTP error). Fall
-    // back to whatever's still in the cache rather than failing every
-    // forex instrument in the response — stale forex data beats none.
-    console.error('[get-analysis] forex batch fetch failed:', err.message);
-    return forexCandlesCache.bySymbol || {};
-  }
-
-  const bySymbol = {};
-  for (const instrument of forexInstruments) {
-    const candlesOrErr = batch[instrument.symbol];
-    if (candlesOrErr instanceof Error) {
-      console.error(`[get-analysis] forex batch entry failed for ${instrument.symbol}:`, candlesOrErr.message);
-      continue;
-    }
-    if (candlesOrErr) bySymbol[instrument.symbol] = candlesOrErr;
-  }
-
-  // Cache whatever we got, even if partial — a partial cache still beats
-  // re-hitting Twelve Data for every symbol on the next request, and
-  // failed symbols will retry naturally once the TTL expires.
-  forexCandlesCache = { bySymbol, fetchedAt: now };
-  return bySymbol;
+  return data?.candles || null;
 }
 
 /**
@@ -247,17 +214,19 @@ async function analyseInstrument(
   profile,
   wantHistory,
   cryptoCandlesBySymbol = null,
-  forexCandlesBySymbol = null
+  supabase = null
 ) {
-  // Forex must never fall through to a live per-symbol Twelve Data call
-  // here — that's exactly the individual-request burst
-  // fetchForexCandlesBundle() exists to avoid. If the batch is missing
-  // this symbol (a failed/partial fetch), surface that as a failure for
-  // this instrument rather than silently falling back to a live call.
+  // Forex must never call Twelve Data live from this path — see
+  // fetchForexCandles' comment. If the cache has nothing for this symbol
+  // yet (fresh deploy, before the first forex ingest tick has run, or a
+  // cache read error), surface that as a failure for this instrument
+  // rather than silently falling back to a live call.
   if (instrument.kind === 'forex') {
-    const candles = forexCandlesBySymbol?.[instrument.symbol];
-    if (!candles) {
-      throw new Error(`No forex candles available for ${instrument.symbol} this cycle.`);
+    const candles = await fetchForexCandles(supabase, instrument.symbol);
+    if (!candles || candles.length < 60) {
+      throw new Error(
+        `No cached forex candles yet for ${instrument.symbol} — the next ingest tick will populate it.`
+      );
     }
     return analyseFromCandles(instrument, profile, wantHistory, candles, null);
   }
@@ -492,15 +461,13 @@ export async function handler(event) {
 
       // Cross-sectional context (Phase 2.3) needs the other pooled
       // crypto symbols' candles too, not just the requested one. Forex
-      // always goes through the batched+cached bundle — never a live
-      // single-symbol Twelve Data call from this read path.
+      // always reads from forex_candle_cache — never a live Twelve Data
+      // call from this read path.
       const cryptoCandlesBySymbol =
         instrument.kind === 'crypto' ? await fetchCryptoCandlesBundle() : null;
-      const forexCandlesBySymbol =
-        instrument.kind === 'forex' ? await fetchForexCandlesBundle() : null;
 
       const [analysis, log] = await Promise.all([
-        analyseInstrument(instrument, profile, true, cryptoCandlesBySymbol, forexCandlesBySymbol),
+        analyseInstrument(instrument, profile, true, cryptoCandlesBySymbol, supabase),
         getPredictionLog(supabase, instrument.symbol),
       ]);
 
@@ -518,17 +485,11 @@ export async function handler(event) {
     // Fetch every crypto instrument's candles once up front, shared by
     // every crypto instrument's cross-sectional context below (and by
     // its own analysis, avoiding a duplicate fetch of the same symbol).
-    // Forex goes through the batched+cached bundle for the same reason —
-    // 10 individual Twelve Data calls per dashboard poll would blow the
-    // free tier's 8 req/min cap on the first request.
-    const [cryptoCandlesBySymbol, forexCandlesBySymbol] = await Promise.all([
-      fetchCryptoCandlesBundle(),
-      fetchForexCandlesBundle(),
-    ]);
+    // Forex reads from forex_candle_cache (see analyseInstrument) —
+    // never a live Twelve Data call from this read path.
+    const cryptoCandlesBySymbol = await fetchCryptoCandlesBundle();
     const settled = await Promise.allSettled(
-      INSTRUMENTS.map((i) =>
-        analyseInstrument(i, profile, wantHistory, cryptoCandlesBySymbol, forexCandlesBySymbol)
-      )
+      INSTRUMENTS.map((i) => analyseInstrument(i, profile, wantHistory, cryptoCandlesBySymbol, supabase))
     );
 
     const instruments = [];

@@ -14,9 +14,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import Admin from './components/Admin.jsx';
 import Dashboard from './components/Dashboard.jsx';
 import DetailView from './components/DetailView.jsx';
 import Settings from './components/Settings.jsx';
+import Terms from './components/Terms.jsx';
 import {
   supabase,
   isSupabaseConfigured,
@@ -28,16 +30,28 @@ import {
 
 const STRATEGY_KEY = 'trendpulse.strategy';
 
+// Client-side only — decides whether the nav link renders. Grants
+// nothing by itself; netlify/functions/admin.js re-checks the caller's
+// email against the private ADMIN_EMAILS env var on every request.
+const ADMIN_EMAILS = (import.meta.env.VITE_ADMIN_EMAILS || '')
+  .split(',')
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+
 /* ------------------------------------------------------------------ */
 /* Chrome                                                              */
 /* ------------------------------------------------------------------ */
 
 function Header({ session, strategy }) {
   const { pathname } = useLocation();
+  const isAdmin = Boolean(
+    session?.user?.email && ADMIN_EMAILS.includes(session.user.email.toLowerCase())
+  );
 
   const navItems = [
     { to: '/', label: 'Dashboard' },
     { to: '/settings', label: 'Settings' },
+    ...(isAdmin ? [{ to: '/admin', label: 'Admin' }] : []),
   ];
 
   return (
@@ -95,16 +109,19 @@ function Footer() {
     <footer className="mt-10 border-t border-divider">
       <div className="mx-auto max-w-7xl px-4 py-5 sm:px-6">
         <p className="max-w-3xl text-micro normal-case leading-relaxed text-ink-faint">
-          <span className="text-amber">Not investment advice.</span> TrendPulse
-          reports standard technical indicators on recent price data. The
-          confidence figure measures internal agreement between its own rules,
-          not the probability of any market outcome, and the heuristic has not
-          been validated against historical returns. Check the prediction log on
-          any detail page to see how its calls have actually performed. Trading
-          crypto and leveraged forex carries substantial risk of loss.
+          TrendPulse reports standard technical indicators on recent price data.
+          Check the prediction log on any detail page to see how its calls have
+          actually performed. See the{' '}
+          <Link to="/terms" className="text-ink-muted underline hover:text-amber">
+            Terms &amp; Conditions
+          </Link>{' '}
+          for the full risk disclosure.
         </p>
         <p className="mt-3 text-micro uppercase text-ink-faint">
-          Crypto via Binance · Forex via Twelve Data · 5-minute candles
+          Crypto via Binance · Forex via Twelve Data · 5-minute candles ·{' '}
+          <Link to="/terms" className="hover:text-amber">
+            Terms &amp; Conditions
+          </Link>
         </p>
       </div>
     </footer>
@@ -250,6 +267,7 @@ export default function App() {
             }
           />
           <Route path="/symbol/:symbol" element={<DetailView strategy={strategy} plan={plan} />} />
+          <Route path="/admin" element={<Admin session={session} />} />
           <Route
             path="/settings"
             element={
@@ -262,6 +280,7 @@ export default function App() {
               />
             }
           />
+          <Route path="/terms" element={<Terms />} />
           <Route path="/dashboard" element={<Navigate to="/" replace />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

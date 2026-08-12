@@ -53,6 +53,7 @@
 
 # --- Local dev --------------------------------------------------------
 [dev]
+  framework = "vite"
   command = "vite"
   targetPort = 5273
   port = 8888

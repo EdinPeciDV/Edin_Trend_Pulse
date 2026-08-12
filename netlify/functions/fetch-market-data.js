@@ -8,16 +8,29 @@
  *   4. upsert one row into market_snapshots
  *
  * ?class=crypto|forex|all (default all) selects which instruments run.
- * schedule-task.js uses this to poll crypto every 5 minutes and forex
- * every 20 — see that file for why. Crypto (Binance) is fetched serially,
- * one call per instrument; forex (Twelve Data) is always fetched as ONE
- * batched request for every forex instrument in the run, to respect the
- * free tier's 8 requests/minute cap — see fetchTwelveDataBatchCandles().
+ * ?group=0|1 (forex only, default 0) selects which HALF of the forex
+ * registry runs — see FOREX_GROUP_SIZE below for why this exists.
+ * schedule-task.js uses both to poll crypto every 5 minutes and forex
+ * every 10, alternating groups so each forex symbol effectively refreshes
+ * every 20 minutes — see that file for the full explanation.
+ *
+ * Crypto (Binance) is fetched serially, one call per instrument — no
+ * meaningful rate limit there. Forex (Twelve Data) is fetched as ONE
+ * batched call, but CAPPED to FOREX_GROUP_SIZE symbols per invocation:
+ * Twelve Data's free tier is 8 API CREDITS/MINUTE (confirmed live — one
+ * credit per symbol per call, batching does not reduce it), so a single
+ * call for all 10 forex pairs 429s immediately regardless of batching.
+ * This function is also the ONLY thing that ever calls Twelve Data —
+ * get-analysis.js reads forex candles from the forex_candle_cache table
+ * this function writes below, instead of calling Twelve Data itself.
+ * That's not an optimisation, it's required: two independent uncoordinated
+ * callers (this cron job and a 60s-polled dashboard) can't safely share
+ * one 8-credit/minute budget without an occasional collision.
  *
  * Invoked by:
  *   - schedule-task.js on its cron tick (the normal path)
  *   - manually: GET /api/fetch-market-data (handy while developing;
- *     defaults to class=all, i.e. everything at once)
+ *     defaults to class=all, group=0 — see resolveForexGroup)
  *
  * Uses the SERVICE ROLE key, so it bypasses RLS. This key must never be
  * exposed to the browser — it lives only in Netlify env vars and is only
@@ -83,6 +96,36 @@ function resolveAssetClass(params) {
 function instrumentsForClass(assetClass) {
   if (assetClass === 'all') return INSTRUMENTS;
   return INSTRUMENTS.filter((i) => i.kind === assetClass);
+}
+
+// 10 forex symbols / 2 groups = 5 per call, comfortably under the
+// 8-credits/minute cap even accounting for jitter. Never fetch more
+// than one group in a single invocation — see the module comment.
+const FOREX_GROUP_SIZE = 5;
+
+function resolveForexGroup(params, forexInstruments) {
+  if (forexInstruments.length === 0) return forexInstruments;
+  const groups = [];
+  for (let i = 0; i < forexInstruments.length; i += FOREX_GROUP_SIZE) {
+    groups.push(forexInstruments.slice(i, i + FOREX_GROUP_SIZE));
+  }
+  const raw = Number(params?.group);
+  const idx = Number.isInteger(raw) && groups[raw] ? raw : 0;
+  return groups[idx];
+}
+
+/** Cache raw candles so get-analysis.js never has to call Twelve Data. */
+async function cacheForexCandles(supabase, instrument, candles) {
+  const { error } = await supabase.from('forex_candle_cache').upsert(
+    { symbol: instrument.symbol, candles, updated_at: new Date().toISOString() },
+    { onConflict: 'symbol' }
+  );
+  if (error) {
+    console.error(
+      `[fetch-market-data] candle cache write failed for ${instrument.symbol}:`,
+      error.message
+    );
+  }
 }
 
 /* --------------------- Per-instrument work -------------------- */
@@ -167,7 +210,8 @@ export async function handler(event) {
   const assetClass = resolveAssetClass(event.queryStringParameters);
   const instruments = instrumentsForClass(assetClass);
   const cryptoInstruments = instruments.filter((i) => i.kind === 'crypto');
-  const forexInstruments = instruments.filter((i) => i.kind === 'forex');
+  const forexInstrumentsFull = instruments.filter((i) => i.kind === 'forex');
+  const forexInstruments = resolveForexGroup(event.queryStringParameters, forexInstrumentsFull);
 
   const results = [];
   const rows = [];
@@ -205,12 +249,14 @@ export async function handler(event) {
     }
   }
 
-  // Forex: ONE batched Twelve Data call for every forex instrument in
-  // this run — never one call per pair. See fetchTwelveDataBatchCandles.
+  // Forex: ONE batched Twelve Data call, capped to FOREX_GROUP_SIZE
+  // symbols (see resolveForexGroup) — never the full forex registry in
+  // one call. Successful fetches are also cached to forex_candle_cache
+  // so get-analysis.js can read them without calling Twelve Data itself.
   if (forexInstruments.length > 0) {
     let batch = {};
     try {
-      batch = await fetchTwelveDataBatchCandles(forexInstruments, '5min', 200);
+      batch = await fetchTwelveDataBatchCandles(forexInstruments, '5min', 300);
     } catch (err) {
       // The whole batch request failed (e.g. network, auth, HTTP error) —
       // every forex instrument in this run failed with it.
@@ -228,6 +274,7 @@ export async function handler(event) {
         continue;
       }
       await recordSnapshot(instrument, candlesOrErr);
+      await cacheForexCandles(supabase, instrument, candlesOrErr);
     }
   }
 
@@ -252,7 +299,7 @@ export async function handler(event) {
     ok: true,
     assetClass,
     written: rows.length,
-    attempted: instruments.length,
+    attempted: cryptoInstruments.length + forexInstruments.length,
     durationMs: Date.now() - startedAt,
     results,
   });
