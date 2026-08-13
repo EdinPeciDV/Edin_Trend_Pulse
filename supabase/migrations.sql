@@ -27,6 +27,7 @@ create table if not exists public.profiles (
                  check (risk_tolerance in ('aggressive', 'conservative')),
   plan          text not null default 'free'
                  constraint profiles_plan_check check (plan in ('free', 'basic', 'pro')),
+  is_lifetime   boolean not null default false,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
@@ -34,11 +35,18 @@ create table if not exists public.profiles (
 comment on table public.profiles is
   'User preferences. risk_tolerance drives the Aggressive/Conservative strategy toggle. plan drives paid-feature gating.';
 
--- Adds `plan` to a profiles table that already existed before this
--- column was introduced. A no-op on a fresh install (the CREATE TABLE
--- above already has it) — this is what makes re-running the whole file
--- safe against an existing project.
+-- Adds `plan` / `is_lifetime` to a profiles table that already existed
+-- before these columns were introduced. A no-op on a fresh install (the
+-- CREATE TABLE above already has them) — this is what makes re-running
+-- the whole file safe against an existing project. Must run BEFORE the
+-- `comment on column ... is_lifetime` below: on an existing table the
+-- CREATE TABLE above is a no-op, so the column doesn't exist until this
+-- ALTER runs.
 alter table public.profiles add column if not exists plan text not null default 'free';
+alter table public.profiles add column if not exists is_lifetime boolean not null default false;
+
+comment on column public.profiles.is_lifetime is
+  'Manually granted via the /admin page, never through Paddle. When true, netlify/functions/webhook.js must not downgrade this account on subscription cancel/pause.';
 
 do $$
 begin
@@ -68,12 +76,13 @@ create policy "profiles: update own"
 
 -- "profiles: update own" is a ROW-level policy — it does not, and
 -- cannot by itself, stop a signed-in user from updating THEIR OWN
--- `plan` column via the anon key (e.g. from devtools). Without the
--- guard below, `supabase.from('profiles').update({ plan: 'pro' })`
--- would succeed for anyone, for free. Only the service role (used
--- exclusively by netlify/functions/webhook.js, after verifying a real
--- Paddle payment) may change `plan`; every other update path has the
--- column silently reverted to its previous value.
+-- `plan` (or `is_lifetime`) column via the anon key (e.g. from
+-- devtools). Without the guard below, `supabase.from('profiles')
+-- .update({ plan: 'pro' })` would succeed for anyone, for free. Only
+-- the service role (netlify/functions/webhook.js after a verified
+-- Paddle payment, or netlify/functions/admin.js for a manual grant)
+-- may change either column; every other update path has them silently
+-- reverted to their previous value.
 create or replace function public.prevent_client_plan_change()
 returns trigger
 language plpgsql
@@ -81,9 +90,15 @@ security definer
 set search_path = public
 as $$
 begin
-  if new.plan is distinct from old.plan and auth.role() <> 'service_role' then
-    raise warning 'profiles.plan change blocked for %: role % is not service_role', old.id, auth.role();
-    new.plan := old.plan;
+  if auth.role() <> 'service_role' then
+    if new.plan is distinct from old.plan then
+      raise warning 'profiles.plan change blocked for %: role % is not service_role', old.id, auth.role();
+      new.plan := old.plan;
+    end if;
+    if new.is_lifetime is distinct from old.is_lifetime then
+      raise warning 'profiles.is_lifetime change blocked for %: role % is not service_role', old.id, auth.role();
+      new.is_lifetime := old.is_lifetime;
+    end if;
   end if;
   return new;
 end;
@@ -309,6 +324,43 @@ begin
   return removed;
 end;
 $$;
+
+-- ===================================================================
+-- 8. forex_candle_cache — raw candles for the read path, not market_snapshots
+-- ===================================================================
+-- Twelve Data's free tier caps at 8 API CREDITS/MINUTE (confirmed via a
+-- live 429 — the docs' "8 requests/minute" undersold it: each symbol in
+-- a request costs a credit regardless of batching). 10 forex pairs can
+-- never be fetched live in one call, and get-analysis.js's dashboard is
+-- polled every 60s per open tab — there is no safe way for that read
+-- path to also call Twelve Data without racing the scheduled ingest for
+-- the same per-minute budget. So fetch-market-data.js is the ONLY
+-- Twelve Data caller for forex; it writes the full candle series it
+-- already fetched here, and get-analysis.js reads from this table
+-- instead of ever calling Twelve Data itself. Zero extra credits, zero
+-- collision risk, full 5-minute-candle resolution preserved.
+--
+-- Deliberately separate from market_snapshots (which stores computed
+-- indicators, one row per bucket) — this stores raw OHLCV, one row per
+-- symbol, overwritten every ingest tick.
+
+create table if not exists public.forex_candle_cache (
+  symbol      text primary key,
+  candles     jsonb not null,
+  updated_at  timestamptz not null default now()
+);
+
+comment on table public.forex_candle_cache is
+  'Latest ~300 raw 5-minute candles per forex symbol, written by fetch-market-data.js. get-analysis.js reads this instead of calling Twelve Data live — see the comment above for why.';
+
+alter table public.forex_candle_cache enable row level security;
+
+-- Same pattern as market_snapshots: market data is public read, and only
+-- the service role (which bypasses RLS) can write.
+drop policy if exists "forex_candle_cache: public read" on public.forex_candle_cache;
+create policy "forex_candle_cache: public read"
+  on public.forex_candle_cache for select
+  using (true);
 
 -- ===================================================================
 -- Done. Verify with:

@@ -9,7 +9,7 @@
  * -------------------------------------------------------------------
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PredictionCard from './PredictionCard.jsx';
 import { fetchDashboard, usePolling } from '../lib/api.js';
@@ -114,10 +114,40 @@ function AssetGroup({ title, hint, instruments, watchlist, onToggleWatch, canWat
 }
 
 /* ------------------------------------------------------------------ */
+/* Asset class filter                                                  */
+/* ------------------------------------------------------------------ */
+
+const ASSET_CLASS_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'crypto', label: 'Crypto' },
+  { key: 'forex', label: 'Forex' },
+];
+
+function AssetClassFilter({ active, onChange }) {
+  return (
+    <div className="segment max-w-sm">
+      {ASSET_CLASS_TABS.map((tab) => (
+        <button
+          key={tab.key}
+          type="button"
+          onClick={() => onChange(tab.key)}
+          aria-pressed={active === tab.key}
+          className={`segment-item ${active === tab.key ? 'segment-item-active' : ''}`}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Dashboard                                                           */
 /* ------------------------------------------------------------------ */
 
 export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch, plan = 'free' }) {
+  const [assetClass, setAssetClass] = useState('all');
+
   const fetcher = useCallback(
     (options) => fetchDashboard(strategy, options),
     [strategy]
@@ -162,7 +192,7 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
       <div className="space-y-6">
         <div className="panel h-12 animate-pulse-tick" />
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 5 }, (_, i) => (
+          {Array.from({ length: 9 }, (_, i) => (
             <CardSkeleton key={i} />
           ))}
         </div>
@@ -236,23 +266,29 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
         </div>
       )}
 
-      <AssetGroup
-        title="Crypto"
-        hint="Binance · 5m candles"
-        instruments={crypto}
-        watchlist={watchlist}
-        onToggleWatch={onToggleWatch}
-        canWatch={canWatch}
-      />
+      <AssetClassFilter active={assetClass} onChange={setAssetClass} />
 
-      <AssetGroup
-        title="Forex"
-        hint="Twelve Data · 5m candles · no consolidated volume"
-        instruments={forex}
-        watchlist={watchlist}
-        onToggleWatch={onToggleWatch}
-        canWatch={canWatch}
-      />
+      {(assetClass === 'all' || assetClass === 'crypto') && (
+        <AssetGroup
+          title="Crypto"
+          hint="Binance · 5m candles"
+          instruments={crypto}
+          watchlist={watchlist}
+          onToggleWatch={onToggleWatch}
+          canWatch={canWatch}
+        />
+      )}
+
+      {(assetClass === 'all' || assetClass === 'forex') && (
+        <AssetGroup
+          title="Forex"
+          hint="Twelve Data · 5m candles · no consolidated volume"
+          instruments={forex}
+          watchlist={watchlist}
+          onToggleWatch={onToggleWatch}
+          canWatch={canWatch}
+        />
+      )}
     </div>
   );
 }
