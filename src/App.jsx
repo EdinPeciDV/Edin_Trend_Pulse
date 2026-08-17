@@ -55,7 +55,7 @@ function Header({ session, strategy }) {
   ];
 
   return (
-    <header className="sticky top-0 z-20 border-b border-divider bg-base/95 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-white/[0.06] bg-base/55 backdrop-blur-xl backdrop-saturate-150">
       <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-3 sm:px-6">
         {/* Wordmark. The pulse dot is the only decoration in the chrome. */}
         <Link to="/" className="flex shrink-0 items-center gap-2">

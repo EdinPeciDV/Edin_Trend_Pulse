@@ -26,7 +26,7 @@
   }
 
   body {
-    @apply bg-base text-ink font-mono antialiased;
+    @apply relative bg-base text-ink font-mono antialiased;
     /* A very faint horizontal scanline field. Barely visible, but it
        stops large dark areas from reading as flat dead space. */
     background-image: repeating-linear-gradient(
@@ -36,6 +36,25 @@
       transparent 1px,
       transparent 3px
     );
+  }
+
+  /* Ambient colour wash, fixed behind everything. This is what the glass
+     panels are actually catching — flat blur on a flat background reads
+     as smudged glass, not frosted glass, so there has to be something
+     with shape and colour underneath for the blur to pick up. Amber
+     keeps the terminal's own accent; the cool tones are decorative only
+     and never reused as UI signal colour (that's still exclusively
+     up/down/amber). */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(48rem 40rem at 12% -8%, rgba(232, 179, 57, 0.14), transparent 60%),
+      radial-gradient(44rem 38rem at 108% 8%, rgba(88, 166, 255, 0.10), transparent 55%),
+      radial-gradient(50rem 42rem at 50% 118%, rgba(140, 110, 255, 0.08), transparent 55%);
+    pointer-events: none;
   }
 
   h1, h2, h3, h4 {
@@ -83,9 +102,12 @@
 /* ------------------------------------------------------------------ */
 
 @layer components {
-  /* The panel: every box in the app is one of these. */
+  /* The panel: every box in the app is one of these. Frosted glass —
+     translucent panel colour + blur, so the ambient wash behind it
+     shows through instead of sitting on a flat, opaque tile. */
   .panel {
-    @apply bg-panel border border-hairline rounded-panel shadow-panel;
+    @apply relative bg-panel/60 border border-white/10 rounded-panel
+           shadow-glass backdrop-blur-xl backdrop-saturate-150;
   }
 
   /* Uppercase letterspaced micro-label. The terminal's voice. */
@@ -112,13 +134,13 @@
   .btn {
     @apply inline-flex items-center justify-center gap-2 px-3 py-2
            text-tick uppercase font-medium tracking-wider
-           border rounded-pill transition-colors duration-150
+           border rounded-pill backdrop-blur-md transition-colors duration-150
            disabled:opacity-40 disabled:cursor-not-allowed;
   }
 
   .btn-ghost {
-    @apply btn border-hairline text-ink-muted
-           hover:border-divider hover:text-ink;
+    @apply btn border-white/10 bg-white/[0.03] text-ink-muted
+           hover:bg-white/[0.06] hover:border-white/20 hover:text-ink;
   }
 
   .btn-amber {
@@ -129,7 +151,8 @@
   /* Segmented toggle (strategy switcher) ------------------------- */
 
   .segment {
-    @apply flex border border-hairline rounded-pill overflow-hidden;
+    @apply flex border border-white/10 bg-white/[0.03] rounded-pill
+           overflow-hidden backdrop-blur-md;
   }
 
   .segment-item {

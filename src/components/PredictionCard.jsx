@@ -78,6 +78,7 @@ export default function PredictionCard({ instrument, isWatched, onToggleWatch, c
     bollinger,
     ml,
     combined,
+    marketClosed,
   } = instrument;
 
   // Only surface the model on a card when it has actually earned it.
@@ -106,6 +107,14 @@ export default function PredictionCard({ instrument, isWatched, onToggleWatch, c
             <span className="label border border-hairline px-1.5 py-0.5">
               {assetClass}
             </span>
+            {marketClosed && (
+              <span
+                className="label border border-hairline px-1.5 py-0.5 text-ink-faint"
+                title="Forex is closed for the weekend — showing the last known read."
+              >
+                closed
+              </span>
+            )}
           </div>
           <p className="mt-0.5 truncate text-tick text-ink-faint">{name}</p>
         </div>

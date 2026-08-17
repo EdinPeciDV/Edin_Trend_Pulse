@@ -150,12 +150,44 @@ async function health(supabase) {
     (s) => !staleness.some((row) => row.symbol === s),
   );
 
+  // forex_candle_cache is a separate table from market_snapshots (see
+  // migrations.sql section 8) — get-analysis.js's read path depends on
+  // it, but fetch-market-data.js writes to it silently and only logs on
+  // failure, so a missing table or stale cache never shows up in
+  // snapshotStaleness above even though ingest looks healthy. Checked
+  // explicitly here so that failure mode is visible without digging
+  // through function logs.
+  const forexSymbols = INSTRUMENTS.filter((i) => i.kind === "forex").map(
+    (i) => i.symbol,
+  );
+  const { data: forexCache, error: forexCacheError } = await supabase
+    .from("forex_candle_cache")
+    .select("symbol, updated_at");
+
+  const forexCacheStaleness = (forexCache || []).map((row) => ({
+    symbol: row.symbol,
+    updatedAt: row.updated_at,
+    ageMinutes: Math.round((now - new Date(row.updated_at).getTime()) / 60000),
+  }));
+  const forexCacheMissing = forexSymbols.filter(
+    (s) => !forexCacheStaleness.some((row) => row.symbol === s),
+  );
+
   return {
     env,
     instrumentsRegistered: INSTRUMENTS.map((i) => i.symbol),
     snapshotStaleness: staleness,
     missingSymbols,
     snapshotError: latestError?.message ?? null,
+    forexCache: {
+      // PGRST205 = table doesn't exist yet — the most common cause of
+      // "no cached forex candles" on the dashboard despite ingest
+      // otherwise looking fine. See supabase/migrations.sql section 8.
+      tableExists: !forexCacheError,
+      error: forexCacheError?.message ?? null,
+      staleness: forexCacheStaleness,
+      missingSymbols: forexCacheMissing,
+    },
   };
 }
 

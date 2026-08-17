@@ -118,6 +118,50 @@ function HealthPanel({ health, onRefresh, isRefreshing }) {
             No snapshot at all yet for: {health.missingSymbols.join(', ')}
           </p>
         )}
+
+        <p className="label mb-2 mt-5">Forex candle cache</p>
+        <p className="mb-2 text-micro normal-case text-ink-faint">
+          Separate from the snapshot table above — the dashboard's forex read path depends
+          on this one specifically. Ingest can look perfectly healthy while this stays empty.
+        </p>
+        {health.forexCache && !health.forexCache.tableExists ? (
+          <p className="text-tick normal-case text-amber">
+            Table missing — this is why forex shows "no cached candles". Run the
+            create-table SQL from supabase/migrations.sql (section 8) in the Supabase SQL
+            editor. ({health.forexCache.error})
+          </p>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="term-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Cached at</th>
+                    <th>Age</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {health.forexCache?.staleness.map((row) => (
+                    <tr key={row.symbol}>
+                      <td>{row.symbol}</td>
+                      <td className="tnum">{new Date(row.updatedAt).toLocaleString()}</td>
+                      <td className={`tnum ${row.ageMinutes > 30 ? 'text-amber' : 'text-up'}`}>
+                        {row.ageMinutes}m
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {health.forexCache?.missingSymbols.length > 0 && (
+              <p className="mt-3 text-tick normal-case text-amber">
+                Table exists but nothing cached yet for:{' '}
+                {health.forexCache.missingSymbols.join(', ')}
+              </p>
+            )}
+          </>
+        )}
       </div>
     </section>
   );
