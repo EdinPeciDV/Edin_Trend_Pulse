@@ -28,6 +28,8 @@ import {
   findInstrument,
   fetchCandles,
   fetchDerivativesContext,
+  isForexMarketOpen,
+  nextForexOpenAt,
 } from '../../shared/marketSources.js';
 import rawModel from '../../shared/model.json';
 import { loadModel, predictFromCandles, combineSignals } from '../../shared/mlModel.js';
@@ -222,20 +224,30 @@ async function analyseInstrument(
   // cache read error), surface that as a failure for this instrument
   // rather than silently falling back to a live call.
   if (instrument.kind === 'forex') {
+    const marketOpen = isForexMarketOpen();
     const candles = await fetchForexCandles(supabase, instrument.symbol);
     if (!candles || candles.length < 60) {
-      throw new Error(
-        `No cached forex candles yet for ${instrument.symbol} — the next ingest tick will populate it.`
+      const err = new Error(
+        marketOpen
+          ? `No cached forex candles yet for ${instrument.symbol} — the next ingest tick will populate it.`
+          : `Forex market is closed for the weekend — ${instrument.symbol} will resume once trading reopens.`
       );
+      err.marketClosed = !marketOpen;
+      if (!marketOpen) err.reopensAt = nextForexOpenAt().toISOString();
+      throw err;
     }
-    return analyseFromCandles(instrument, profile, wantHistory, candles, null);
+    // Stale weekend candles are still a valid last-known read — surfaced
+    // via marketClosed rather than treated as a failure.
+    return analyseFromCandles(instrument, profile, wantHistory, candles, null, {
+      marketClosed: !marketOpen,
+    });
   }
 
   const candles = cryptoCandlesBySymbol?.[instrument.symbol] || (await fetchCandles(instrument, 300));
   return analyseFromCandles(instrument, profile, wantHistory, candles, cryptoCandlesBySymbol);
 }
 
-async function analyseFromCandles(instrument, profile, wantHistory, candles, cryptoCandlesBySymbol) {
+async function analyseFromCandles(instrument, profile, wantHistory, candles, cryptoCandlesBySymbol, extra = {}) {
   const closes = candles.map((c) => c.close);
   const price = closes[closes.length - 1];
   const prevClose = closes.length > 1 ? closes[closes.length - 2] : price;
@@ -323,6 +335,7 @@ async function analyseFromCandles(instrument, profile, wantHistory, candles, cry
     combined,
     entryWindow,
     lastTick: candles[candles.length - 1].openTime,
+    marketClosed: extra.marketClosed ?? false,
   };
 
   if (wantHistory) {
@@ -502,6 +515,8 @@ export async function handler(event) {
         failures.push({
           symbol: INSTRUMENTS[idx].symbol,
           error: r.reason?.message || 'Unknown error',
+          marketClosed: Boolean(r.reason?.marketClosed),
+          reopensAt: r.reason?.reopensAt || null,
         });
       }
     });

@@ -83,6 +83,16 @@ export function timeAgo(ts) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/** "Sun 22:00 UTC" style — when a closed market reopens. */
+export function formatReopen(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const weekday = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${weekday} ${hh}:${mm} UTC`;
+}
+
 /** Compact volume: 1.2M, 940K. */
 export function formatVolume(value) {
   if (value == null || Number.isNaN(value)) return '—';

@@ -168,6 +168,37 @@ export function findInstrument(symbol) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Forex market hours                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Spot FX trades 24/5: opens Sunday 22:00 UTC, closes Friday 22:00 UTC
+ * (the conventional New York 17:00 ET close/open used industry-wide).
+ * Crypto has no such window — this only applies to forex instruments.
+ */
+export function isForexMarketOpen(date = new Date()) {
+  const day = date.getUTCDay(); // 0 Sun ... 6 Sat
+  const hour = date.getUTCHours();
+  if (day === 6) return false; // Saturday: closed all day
+  if (day === 0 && hour < 22) return false; // Sunday before 22:00 UTC
+  if (day === 5 && hour >= 22) return false; // Friday after 22:00 UTC
+  return true;
+}
+
+/**
+ * When the market next opens, or null if it's already open. Used to tell
+ * the user "reopens Sun 22:00 UTC" instead of a bare "closed".
+ */
+export function nextForexOpenAt(date = new Date()) {
+  if (isForexMarketOpen(date)) return null;
+  const target = new Date(date);
+  target.setUTCHours(22, 0, 0, 0);
+  const daysUntilSunday = (7 - target.getUTCDay()) % 7;
+  target.setUTCDate(target.getUTCDate() + daysUntilSunday);
+  return target;
+}
+
+/* ------------------------------------------------------------------ */
 /* Binance                                                             */
 /* ------------------------------------------------------------------ */
 

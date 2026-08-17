@@ -13,7 +13,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PredictionCard from './PredictionCard.jsx';
 import { fetchDashboard, usePolling } from '../lib/api.js';
-import { timeAgo } from '../lib/helpers.js';
+import { timeAgo, formatReopen } from '../lib/helpers.js';
 import { allowedSymbolsFor } from '../lib/plans.js';
 
 /* ------------------------------------------------------------------ */
@@ -185,6 +185,12 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
 
   const crypto = instruments.filter((i) => i.assetClass === 'crypto');
   const forex = instruments.filter((i) => i.assetClass === 'forex');
+  const forexMarketClosed = forex.some((i) => i.marketClosed);
+
+  // Split upstream failures: a closed weekend market isn't a "feed down"
+  // and shouldn't read as one — it gets its own calm, non-amber notice.
+  const downFailures = (data?.failures || []).filter((f) => !f.marketClosed);
+  const closedFailures = (data?.failures || []).filter((f) => f.marketClosed);
 
   /* ---- First load ---- */
   if (loading && !data) {
@@ -252,17 +258,30 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
         </div>
       )}
 
-      {/* Per-instrument upstream failures. */}
-      {data?.failures?.length > 0 && (
+      {/* Per-instrument upstream failures — actual problems only. */}
+      {downFailures.length > 0 && (
         <div className="panel border-amber/30 px-4 py-2.5">
           <p className="label-amber mb-1">Some feeds are down</p>
           <ul className="space-y-0.5">
-            {data.failures.map((f) => (
+            {downFailures.map((f) => (
               <li key={f.symbol} className="text-micro normal-case text-ink-muted">
                 <span className="text-amber">{f.symbol}</span> — {f.error}
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* Closed weekend market — expected, not a failure, so no amber. */}
+      {closedFailures.length > 0 && (
+        <div className="panel border-hairline px-4 py-2.5">
+          <p className="label mb-1">Forex market closed</p>
+          <p className="text-micro normal-case text-ink-faint">
+            {closedFailures.length} pair{closedFailures.length === 1 ? '' : 's'} have no
+            weekend data cached yet.{' '}
+            {closedFailures[0].reopensAt &&
+              `Reopens ${formatReopen(closedFailures[0].reopensAt)}.`}
+          </p>
         </div>
       )}
 
@@ -282,7 +301,11 @@ export default function Dashboard({ strategy, watchlist, onToggleWatch, canWatch
       {(assetClass === 'all' || assetClass === 'forex') && (
         <AssetGroup
           title="Forex"
-          hint="Twelve Data · 5m candles · no consolidated volume"
+          hint={
+            forexMarketClosed
+              ? 'Twelve Data · 5m candles · market closed for the weekend'
+              : 'Twelve Data · 5m candles · no consolidated volume'
+          }
           instruments={forex}
           watchlist={watchlist}
           onToggleWatch={onToggleWatch}

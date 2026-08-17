@@ -79,13 +79,20 @@ export default {
       },
 
       borderRadius: {
-        // Terminals are rectangular. Radius is near-zero throughout.
-        panel: '2px',
-        pill: '2px',
+        // Frosted glass reads as glass mainly through soft corners —
+        // panels get a real radius, pills go fully round. (Was near-zero
+        // for a pure terminal look; softened for the glassmorphism pass.)
+        panel: '16px',
+        pill: '9999px',
       },
 
       boxShadow: {
         panel: '0 1px 0 0 rgba(255,255,255,0.03) inset',
+        // Glass panel: a bright inner top edge (the "light catching the
+        // rim" cue) plus a soft, diffuse drop shadow so panels feel like
+        // they're floating above the ambient background wash.
+        glass:
+          '0 1px 0 0 rgba(255,255,255,0.07) inset, 0 20px 44px -16px rgba(0,0,0,0.6)',
         'glow-up': '0 0 0 1px rgba(61, 214, 140, 0.35)',
         'glow-down': '0 0 0 1px rgba(255, 92, 92, 0.35)',
         'glow-amber': '0 0 0 1px rgba(232, 179, 57, 0.35)',
