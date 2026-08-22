@@ -1326,3 +1326,103 @@ Checked directly in `ml_macd/labels.py::build_label()`:
   `fwd_return < -threshold`) therefore compares two already-scale-free
   quantities. **No raw price delta anywhere in label construction** —
   confirmed by reading the actual code, not inferred from intent.
+
+## 19. Phase 3 — volume profile / TPO (session anchoring window only)
+
+Built and tested against real data. **Scope decision, stated up
+front**: PART 3 asks for three anchoring windows (session, rolling,
+fixed-range). Only **session** is built, fully and correctly — the
+one PART 3's own naked-POC bookkeeping section is explicitly about
+("track PRIOR-SESSION POCs"). Rolling and fixed-range are DESIGNED,
+not built, disclosed here rather than silently thinned out across
+three shallow implementations.
+
+`ml_macd/volume_profile.py` — the ONE shared engine PART 3 asks for,
+pluggable by weight array, not three separate implementations:
+`mode="real_volume"` (weight=volume), `mode="tick_volume"`
+(weight=number_of_trades — generic/kept for a future CME-futures
+source per PART 4's deferred extension, never invoked for FX), and
+`mode="tpo"` (weight=1 per bar/time-slice). Bin width is
+`atr_bin_multiple x ATR` (default 10% of ATR), resolved once per
+profile and logged in its own return value, never a silent fixed
+price step. Bar weight is distributed PROPORTIONALLY TO OVERLAP
+LENGTH across every bin the bar's `[low, high]` range touches (not
+dumped into the close's bin) — verified directly: total profile
+weight exactly equals the sum of input weight (`120,883.31287` in
+both cases, to full float precision), confirming no weight is lost
+or double-counted by the distribution logic. Extracts POC (max-weight
+bin), VAH/VAL (grown outward from POC to 70% of total weight by
+default), HVN/LVN (local peaks/troughs), and `volume_edge` (steepest
+weight-gradient bins).
+
+`ml_macd/session_profile.py` — session anchoring: UTC calendar day,
+for BOTH crypto and forex (PART 3 asks for a real trading-day/holiday
+calendar for FX; none exists in this project — same disclosed gap as
+`bars_until_session_close` in `macd_features.py`, not a new one).
+**Naked POC bookkeeping**: a forward pass, chronological, tracking
+each closed session's POC as naked until price trades through it
+(intrabar — a bar's own `[low, high]`, not just close-to-close) —
+consumed permanently thereafter. **A guard added after real-data
+testing**: `build_session_profiles()` now raises loudly if
+`real_volume`/`tick_volume` mode is called against all-NaN weight
+data (i.e. FX) — this is exactly the source-pinning boundary
+README.md section 2 already established, made structurally
+impossible to violate by accident rather than just documented.
+
+`ml_macd/profile_features.py` — converts session profiles into
+per-bar features, namespaced `session_{mode}_...`: `dist_to_poc_atr`,
+`dist_to_vah_atr`, `dist_to_val_atr`, `inside_value_area`,
+`dist_to_hvn_atr`, `dist_to_lvn_atr`, `dist_to_volume_edge_atr`,
+`poc_migration_atr`, `value_area_width_atr`, `bars_since_poc_touch`,
+`naked_poc_distance_atr`, `naked_poc_age` — 12 features, all
+referencing the most recently CLOSED prior session's profile, never a
+bar's own (possibly still-forming) one. `poc_agreement()`: crypto-only
+per section 2's binding decision (FX has no volume POC to compare
+against — always undefined there, not zero-filled).
+
+**A disclosed, deliberate engineering bound**: `naked_poc_distance_atr`/
+`naked_poc_age` search only the most recent `naked_lookback_sessions`
+(default 60, ~2 months) rather than every naked POC ever formed —
+searching the full history is O(n_bars x n_naked_pocs), tens of
+millions of comparisons over a multi-year crypto series, impractically
+slow in pure Python. Also the economically sensible choice
+independent of performance: an 8-year-old untouched POC isn't a level
+traders are meaningfully watching today. Verified the bound is
+actually enforced: max observed `naked_poc_age` on BTC/USDT 1h was
+1,464 bars — matches `60 sessions x ~24 bars/session ≈ 1,440`, not the
+unbounded alternative.
+
+### Tests, all passed
+
+- **Naked POC consumption** (PART 3's explicit requirement): a
+  deliberately constructed fixture — caught its OWN bug first (the
+  initial fixture's default price range already spanned the test POC
+  on every bar, so it "consumed" immediately rather than at the
+  intended bar; fixed by widening the default range away from the
+  POC before the dip). After the fix: POC touched at bar 10 correctly
+  reads not-naked at both bar 10 and bar 11.
+- **No current-session leak** (profile-labeling level): every profile
+  marked `in_progress=False` is verified to genuinely not be the
+  session containing "now."
+- **Full-pipeline no-lookahead** (PART 3's own explicit warning — "the
+  easiest place in this whole system to leak the future," so a
+  profile-labeling check alone wasn't treated as sufficient): the same
+  truncate-and-recompute method as every other look-ahead test in this
+  project, applied to the actual downstream feature VALUES (not just
+  whether a profile is labeled correctly) — 4 truncation points x all
+  12 features on real BTC/USDT history. PASS.
+- **FX path**: session profiles + naked POC + features all built and
+  tested end-to-end on real EUR/USD data, TPO mode only, as designed.
+
+### Not built, disclosed rather than faked
+
+- **Rolling and fixed-range anchoring windows** — design only (see
+  scope decision above).
+- **The PART 3 ablation** ((a) MACD only vs. (b) MACD+TPO vs. (c)
+  MACD+TPO+volume) — needs a trained model to compare
+  coverage-precision curves; correctly deferred to training, which
+  remains explicitly out of scope for this phase.
+- **`poc_agreement` as a data-quality report** — computed and
+  available (`poc_agreement()`), but the distribution hasn't been
+  formally characterized/reported yet the way section 17's stationarity
+  table was; worth a pass alongside the ablation work.
