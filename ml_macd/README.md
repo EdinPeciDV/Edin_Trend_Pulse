@@ -1426,3 +1426,119 @@ unbounded alternative.
   available (`poc_agreement()`), but the distribution hasn't been
   formally characterized/reported yet the way section 17's stationarity
   table was; worth a pass alongside the ablation work.
+
+## 20. Three items held before proceeding
+
+### 1. FX volume guard — raises for FX, was silently WRONG for crypto gaps
+
+**Before this fix, the guard RAISED for FX** (correct outcome,
+wrong mechanism — see below) **but MISSED a worse case entirely.**
+Tested directly rather than reasoned about: fed `build_profile()` a
+session with 4 of 24 bars NaN-weighted (simulating a crypto ingestion
+gap) — the OLD global `all NaN` check didn't fire (most of the array
+was fine), so it silently proceeded. Result: `total_weight = NaN`,
+7 of 17 bins NaN — **and `poc`/`vah`/`val` were still returned as if
+the profile were valid, with zero indication anything was wrong.**
+Confirmed empirically before touching any code, not assumed.
+
+**Fixed** — moved the check from ONE global pass to PER-SESSION (a
+localized gap can't hide inside an otherwise-clean multi-year
+series), and made `volume_is_proxy` (already known per symbol, not
+inferred from the NaN pattern) the skip-vs-raise signal:
+- `volume_is_proxy=True` (FX) → **skips** that window's profile for
+  that mode, cleanly, no exception. Verified: `EUR/USD` in
+  `real_volume` mode now returns `0` profiles with no exception
+  raised (previously: raised, on a global check that happened to
+  catch FX's case correctly but for the wrong reason — it would have
+  missed a partial gap on FX too, same as it missed one on crypto).
+- `volume_is_proxy=False/None` (crypto) with ANY NaN present, all or
+  partial → **raises** `ValueError`, loud and immediate. Verified: the
+  synthetic 4/24-bar gap now raises with a message naming the exact
+  session and NaN count, instead of silently returning a corrupted
+  profile.
+- Normal crypto (no gaps) — regression-checked unaffected: still
+  builds all `3,271` BTC/USDT sessions.
+
+Factored into a shared helper (`volume_profile.py::check_weight_window()`,
+`resolve_weight_mode_array()`) so this exact decision is written once
+and reused by every anchoring window — `session_profile.py` was
+refactored to call it instead of its own inline copy, and
+`rolling_profile.py` (built after this fix, see item 3) uses the same
+helper from day one rather than risking a second, possibly-diverging
+implementation of the same guard.
+
+### 2. Label scale-freeness — confirmed with actual numbers, not just the formula
+
+Code-reading alone (already reported once) wasn't treated as
+sufficient — computed the real distributions on BTC/USDT and EUR/USD
+at three horizons:
+
+| N | BTC mean / std | EUR mean / std | BTC close range | EUR close range |
+|---|---|---|---|---|
+| 4 | 0.000136 / 0.014653 | 0.000006 / 0.001907 | 2,919 – 126,011 | 0.9538 – 1.2341 |
+| 12 | 0.000414 / 0.024605 | 0.000018 / 0.003252 | 2,919 – 126,011 | 0.9538 – 1.2341 |
+| 48 | 0.001635 / 0.049188 | 0.000129 / 0.006357 | 2,919 – 126,011 | 0.9538 – 1.2341 |
+
+**This is the correct signature of a scale-free target, stated
+plainly**: price levels differ by ~130,000x between the two assets,
+but the forward-return standard deviations differ by only ~7.7x
+(0.0147 vs. 0.0019 at N=4) — a real, legitimate volatility-regime gap
+between crypto and FX (exactly the same kind of asset-class
+difference already found and accepted in section 17's stationarity
+audit), not a price-level artifact. Had labels been built from raw
+price deltas instead of log-returns, the gap between the two would be
+5-6 orders of magnitude, not <1 — trivially distinguishable from what
+was actually measured. Forward return is `log(close[i+N]/close[i])`;
+threshold is `band x (ATR/close)`; both scale-free by construction
+(section 18) and now confirmed scale-free by measurement too.
+
+### 3. Rolling profile — built, fixed-range still deferred
+
+`ml_macd/rolling_profile.py`. Causality is SELF-CONTAINED (same
+philosophy as session profile, not dependent on an external
+shift-by-1 step): a profile attached to bar `i` is built from bars
+strictly before it, `[i-window, i-1]`, by construction — never
+including bar `i` itself.
+
+**Refresh cadence is bounded**, the same disclosed tradeoff already
+made for the naked-POC lookback in section 19: rebuilding a full
+O(window)-bar profile at every single bar is impractical over a
+78k-bar series. Default `refresh_every = window // 4`; profiles are
+forward-filled between refreshes, so staleness is bounded to at most
+`refresh_every` bars — never silent. Verified on real BTC/USDT
+(`window=200`): `1,564` profiles built (vs. `3,271` session profiles
+over the same history — rolling refreshes far more often since it
+isn't tied to a daily reset), first profile at bar 200 using window
+`[0, 199]`, `200` bars correctly have no profile yet (exact match to
+`window`).
+
+Reuses `session_profile.py`'s exact NaN-guard helper (item 1) — the
+FX real-data test confirms it: `EUR/USD` rolling `tpo` mode builds
+`845` profiles cleanly, all 9 features populated for ~100% of valid
+bars.
+
+**Required leakage test — two independent checks, both must hold**,
+`assert_rolling_profile_strictly_prior()`:
+1. **Structural**: every profile's `window_end_idx < i` and
+   `built_at_idx <= i` for every bar `i` that references it —
+   checked directly against the actual index bookkeeping, not
+   inferred from the refresh logic being "obviously correct."
+2. **Empirical**, same truncate-and-recompute method as every other
+   look-ahead test in this project: rebuild the ENTIRE rolling
+   pipeline on a series truncated at bar `i`, compare bar `i`'s
+   feature values to the full-history computation — proving the
+   window never reached past `i` regardless of what data exists
+   beyond it, not just that the code LOOKS like it wouldn't.
+
+**PASS on both BTC/USDT (real_volume, 22.1s) and EUR/USD (tpo,
+11.8s)** — all 9 features (`dist_to_poc/vah/val_atr`,
+`inside_value_area`, `dist_to_hvn/lvn/volume_edge_atr`,
+`poc_migration_atr`, `value_area_width_atr`) x 4 truncation points,
+zero leaks. No naked-POC features here — PART 3's naked-POC
+bookkeeping is explicitly a SESSION concept ("prior-SESSION POCs");
+rolling has no sessions to be prior to.
+
+**Fixed-range stays deferred**, per the explicit decision: it needs
+swing-high/low detection, a dependency not worth proving out before
+knowing whether profile features carry any signal at all — that
+question is answered by training, still correctly out of scope here.
