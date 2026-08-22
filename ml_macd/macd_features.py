@@ -80,7 +80,7 @@ FEATURE_NAMES = [
     # --- Divergence ---
     "bearish_divergence", "bullish_divergence",
     # --- Order flow (crypto only — 0 for forex, never NaN) ---
-    "taker_buy_ratio", "taker_buy_ratio_slope_5", "trades_per_unit_volume",
+    "taker_buy_ratio", "taker_buy_ratio_slope_5", "trades_per_unit_volume_z",
     # --- Context ---
     "rsi_14_c", "bb_width", "vwap_distance", "atr_pctile_200",
     "hour_sin", "hour_cos",
@@ -97,7 +97,7 @@ N_FEATURES = len(FEATURE_NAMES)
 # crypto/stock (PART 2's conflict-resolution binding decision: FX gets
 # TPO/tick_volume profiles in PART 3, but VWAP itself stays gated).
 CONTEXT_GATED_FEATURES = {
-    "taker_buy_ratio", "taker_buy_ratio_slope_5", "trades_per_unit_volume",
+    "taker_buy_ratio", "taker_buy_ratio_slope_5", "trades_per_unit_volume_z",
     "vwap_distance",
 }
 
@@ -333,13 +333,29 @@ def build_features(candles, htf_candles):
         taker_buy_ratio = np.nan_to_num(taker_buy_ratio, nan=0.0)
         taker_buy_ratio_slope_5 = np.full(n, 0.0)
         taker_buy_ratio_slope_5[5:] = taker_buy_ratio[5:] - taker_buy_ratio[:-5]
+        # STATIONARITY FIX (post-hoc audit, cross-asset check): the raw
+        # ratio n_trades/volume is NOT scale-free across symbols — volume
+        # is denominated in base-asset units, which differ by orders of
+        # magnitude (BTC: thousands/hour; DOGE: billions/hour), so the
+        # raw ratio silently encodes "which asset is this" rather than a
+        # market-behavior signal. Empirically: BTC max 719.5 vs DOGE max
+        # 0.00386 on real data — a ~186,000x gap. Rolling z-score against
+        # the symbol's OWN 48-bar history (same window/pattern as
+        # ml/features.py's volume_z) is unitless by construction and
+        # fixes this, while still capturing genuine relative-trade-size
+        # dynamics rather than an absolute, unit-dependent level.
         with np.errstate(divide="ignore", invalid="ignore"):
-            trades_per_unit_volume = np.where(volume > 0, n_trades / volume, 0.0)
-        trades_per_unit_volume = np.nan_to_num(trades_per_unit_volume, nan=0.0)
+            raw_ratio = np.where(volume > 0, n_trades / volume, 0.0)
+        raw_ratio = np.nan_to_num(raw_ratio, nan=0.0)
+        r_mean = _rolling_mean(raw_ratio, 48)
+        r_sd = _rolling_std(raw_ratio, 48)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            trades_per_unit_volume_z = np.where(r_sd > 0, (raw_ratio - r_mean) / r_sd, 0.0)
+        trades_per_unit_volume_z = np.clip(np.nan_to_num(trades_per_unit_volume_z, nan=0.0), -5, 5)
     else:
         taker_buy_ratio = np.zeros(n)
         taker_buy_ratio_slope_5 = np.zeros(n)
-        trades_per_unit_volume = np.zeros(n)
+        trades_per_unit_volume_z = np.zeros(n)
 
     # --- Context ---
     rsi14 = wilder_rsi(close, 14)
@@ -397,7 +413,7 @@ def build_features(candles, htf_candles):
         "htf_alignment": htf_alignment,
         "bearish_divergence": bearish_divergence, "bullish_divergence": bullish_divergence,
         "taker_buy_ratio": taker_buy_ratio, "taker_buy_ratio_slope_5": taker_buy_ratio_slope_5,
-        "trades_per_unit_volume": trades_per_unit_volume,
+        "trades_per_unit_volume_z": trades_per_unit_volume_z,
         "rsi_14_c": rsi_14_c, "bb_width": bb_width, "vwap_distance": vwap_distance,
         "atr_pctile_200": atr_pctile_200,
         "hour_sin": hour_sin, "hour_cos": hour_cos,
