@@ -1182,3 +1182,147 @@ weighing directly against `--cache-dir`'s own cost (staleness risk
 while the feature set is still being iterated on, per section 13)
 when that decision actually comes up. At ~5.3s of real compute per
 symbol, recompute is not remotely "annoying" yet.
+
+## 17. Stationarity audit — every one of the 44 features, checked
+
+Prompted directly by bug #1 in section 16 (the histogram-slope bug):
+a range check alone only catches a stationarity violation that
+produces an ABSURD number. A feature that silently encodes price or
+volume level but happens to land in a plausible-looking range would
+pass every range check ever written and still teach a model "what
+asset is this" instead of momentum — invisible to the
+coverage-precision curve, which would just quietly cap below its true
+ceiling with no error anywhere.
+
+**Method**: for every feature, classify it by construction (raw /
+normalized / bounded / gated), then check empirically — not just
+reason about it — using real backfilled data at three genuinely
+different price/volume scales: BTC/USDT (~$2.9k–126k), EUR/USD
+(~0.95–1.23), and DOGE/USDT (~$0.001–0.74, with volume in the
+BILLIONS of DOGE/hour vs. BTC's thousands of BTC/hour — the volume
+comparison needed its own third asset, since context-gated
+crypto-only features are correctly 0 on FX by design and a crypto-vs-FX
+comparison alone can't test them).
+
+| # | Feature | Design | Normalized by | Cross-asset check |
+|---|---|---|---|---|
+| 1 | `macd_norm_close` | normalized | close | PASS — BTC/DOGE ranges comparable despite 100,000x price gap; EUR narrower reflects FX's genuinely lower volatility, not a leak |
+| 2 | `signal_norm_close` | normalized | close | PASS (same reasoning as #1) |
+| 3 | `hist_norm_close` | normalized | close | PASS |
+| 4 | `macd_norm_atr` | normalized | ATR | PASS — ranges closely comparable across all three (~±3) |
+| 5 | `signal_norm_atr` | normalized | ATR | PASS |
+| 6 | `hist_norm_atr` | normalized | ATR | PASS |
+| 7 | `macd_above_zero` | bounded | {0,1} | PASS (boolean) |
+| 8 | `bars_since_cross` | bar count | — | PASS — not price-related by construction; comparable ranges (0–65 to 0–83) confirm no hidden price dependence |
+| 9 | `cross_direction` | bounded | {-1,0,1} | PASS |
+| 10 | `price_move_since_cross_atr` | normalized | ATR | PASS — comparable ranges (~±11–13) |
+| 11 | `hist_slope_1` | normalized | ATR (via hist_norm_atr) | **FIXED** — was raw histogram (bug #1); now comparable ranges (~±0.5) |
+| 12 | `hist_slope_3` | normalized | ATR | FIXED (same root cause as #11) |
+| 13 | `hist_slope_5` | normalized | ATR | FIXED |
+| 14 | `hist_slope_2nd_diff` | normalized | ATR | FIXED |
+| 15 | `hist_ratio` | bounded | [0,1] by construction (ratio to its own running max) | PASS — provably bounded, not just empirically |
+| 16 | `bars_since_hist_peak` | bar count | — | PASS — comparable ranges (0–46 to 0–57) |
+| 17 | `htf_macd_above_zero` | bounded | {0,1} | PASS |
+| 18 | `htf_cross_direction` | bounded | {-1,0,1} | PASS |
+| 19 | `htf_alignment` | bounded | {0,1} | PASS |
+| 20 | `bearish_divergence` | bounded | {0,1} — a flag, not a magnitude | PASS — divergence is deliberately boolean in this design (see section 16), so there is no raw magnitude to leak |
+| 21 | `bullish_divergence` | bounded | {0,1} | PASS |
+| 22 | `taker_buy_ratio` | ratio of same-unit quantities | taker_buy_base / volume (units cancel) | PASS — structurally scale-free; 0 for forex by design (context-gated) |
+| 23 | `taker_buy_ratio_slope_5` | ratio-of-ratio | — | PASS |
+| 24 | `trades_per_unit_volume_z` | **was raw, now z-scored** | rolling 48-bar mean/std (own history) | **FAILED, FIXED** — see below, the one real finding |
+| 25 | `rsi_14_c` | bounded | [-0.5, 0.5] | PASS |
+| 26 | `bb_width` | normalized | close (via SMA mid) | PASS — DOGE's much wider range (max 2.64 vs. BTC's 0.57) reflects genuine extreme volatility (DOGE's real pump history), not unit-encoding; structurally a coefficient-of-variation, provably scale-free with respect to price level |
+| 27 | `vwap_distance` | log-ratio | close/vwap | PASS — scale-free by construction; 0 for forex (context-gated, PART 2 binding decision) |
+| 28 | `atr_pctile_200` | bounded | [0,1], percentile rank | PASS |
+| 29 | `hour_sin` | bounded | [-1,1] | PASS |
+| 30 | `hour_cos` | bounded | [-1,1] | PASS |
+| 31–33 | `session_asia/london/ny` | bounded | {0,1} | PASS |
+| 34–40 | `dow_mon`…`dow_sun` | bounded | {0,1} | PASS |
+| 41 | `gap_size_atr` | normalized | ATR | PASS — EUR's wider range (up to ±5 vs. crypto's ±1) reflects real FX weekend-gap risk crypto structurally doesn't have, not a leak |
+| 42 | `is_session_open_bar` | bounded | {0,1}, proxy | PASS |
+| 43 | `bars_missing_before` | bar count | — | PASS — different max values across assets (EUR 70 vs. DOGE 8) reflect genuine differences in how often each vendor/asset has gaps, not price-encoding |
+| 44 | `is_post_gap_bar` | bounded | {0,1} | PASS |
+
+**The one real failure: `trades_per_unit_volume_z` (was `trades_per_unit_volume`)**.
+Empirically, before the fix: BTC max `719.5` vs. DOGE max `0.00386` —
+a **~186,000x** gap on the same nominal feature. Root cause: the raw
+ratio `number_of_trades / volume` is not scale-free across symbols —
+`volume` is denominated in base-asset units, which differ by orders
+of magnitude (BTC: thousands of BTC/hour; DOGE: billions of
+DOGE/hour), so the raw ratio silently encoded which asset it was,
+not a market-behavior signal. This is precisely the failure mode the
+requirement warned about: a plausible-looking number (not visibly
+absurd like the ~1000-scale histogram bug) that would have sailed
+through any range check.
+
+**Fix**: rolling 48-bar z-score against the symbol's OWN history —
+same window and pattern as `ml/features.py`'s existing `volume_z`
+(clipped to ±5, undefined-or-zero-std collapses to 0, matching that
+file's established convention rather than inventing a new one).
+Column renamed `trades_per_unit_volume_z` so the transformation is
+visible in the name, not just a code comment. Re-verified directly:
+BTC and DOGE both now land in `[-5, 5]` with near-identical means
+(`0.024` vs. `0.027`) — genuinely comparable distributions, not just
+a coincidentally-matching range. Re-ran the full test suite after the
+fix: no-lookahead still passes on both BTC/USDT and EUR/USD, and the
+label threshold test is unaffected (it doesn't touch this feature).
+
+**Nothing else required a fix.** The wide range DIFFERENCES noted
+above (DOGE's `bb_width`, EUR's `gap_size_atr`) are real market
+structure — different assets and asset classes genuinely have
+different volatility/gap characteristics — not price or volume level
+leaking through a normalization that should have cancelled it. The
+distinguishing test throughout: does the SAME feature, on the SAME
+asset, look reasonable at wildly different price levels (BTC at
+~$3k vs. ~$126k, or DOGE at ~$0.001 vs. ~$0.74) — not whether every
+asset produces an identical distribution, which would be the wrong
+bar (real volatility differences are information, not noise).
+
+**Two implications of the fix, recorded so they aren't rediscovered:**
+
+1. **Warmup — confirmed, not assumed.** `trades_per_unit_volume_z`
+   adds its own 48-bar rolling warmup, separate from the EMA/ATR/RSI
+   recursive warmup section 1 derived `warmup_bars=260` for. Tested
+   directly rather than reasoning "260 >> 48 so it's probably fine":
+   built features from the full BTC/USDT history, then again from
+   only the trailing 260 bars (simulating a live-serving buffer sized
+   at `warmup_bars`), and compared this feature's value at the final
+   bar — **exact match, `diff = 0.0`**, not just within tolerance.
+   This is actually a stronger guarantee than the EMA-based features
+   get: a plain rolling mean/std (unlike a recursive EMA) has ZERO
+   approximation error once enough prior bars exist — 48 bars is a
+   hard, exact requirement, not an asymptotic convergence question,
+   and 260 clears it with 212 bars to spare. `warmup_bars=260` fully
+   absorbs this feature with no change needed.
+2. **Semantic note — read this before using the feature.**
+   Z-scoring against the symbol's OWN trailing 48 bars means
+   `trades_per_unit_volume_z` encodes "trade intensity relative to
+   THIS symbol's recent regime," not an absolute level and not a
+   cross-asset-comparable one the way the raw ratio's NAME might
+   suggest. That's the correct choice for stationarity (section 17's
+   whole point), but it is a genuinely different meaning than the raw
+   ratio had — a value of `+2` means "unusually high for this symbol
+   lately," not "high in some universal sense." Don't read it as the
+   latter later.
+
+## 18. Label construction — same units-don't-cancel trap, checked
+
+The same class of bug that broke `trades_per_unit_volume` could
+equally have broken the LABEL itself — a $500 BTC move and a 0.005
+EUR/USD move can both be "one ATR," but as raw price deltas they are
+wildly different absolute numbers; a model trained on absolute deltas
+would learn asset identity through the target, not just the features,
+which no amount of feature-side stationarity work would catch.
+
+Checked directly in `ml_macd/labels.py::build_label()`:
+- **Forward return** (line 71): `fwd_return = logp[i+N] - logp[i]` —
+  `logp = np.log(close)`, so this is `log(close[i+N] / close[i])`, a
+  LOG-RETURN. Scale-free by construction: a log-return doesn't care
+  whether `close` is 1.08 or 91,000.
+- **Threshold** (lines 76–77): `atr_frac = atr14 / close`;
+  `threshold = band * atr_frac` — ATR expressed as a FRACTION of
+  price, not raw ATR. Also scale-free.
+- The classification itself (`fwd_return > threshold` /
+  `fwd_return < -threshold`) therefore compares two already-scale-free
+  quantities. **No raw price delta anywhere in label construction** —
+  confirmed by reading the actual code, not inferred from intent.
