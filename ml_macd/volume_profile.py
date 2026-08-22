@@ -195,3 +195,67 @@ def _steepest_gradient_bins(bin_weights, bin_centers, top_k=2):
     # edge as the boundary price, not either bin's center.
     edges = (bin_centers[idx] + bin_centers[idx + 1]) / 2.0
     return sorted(float(e) for e in edges)
+
+
+# ------------------------------------------------------------------ #
+# Shared weight resolution + NaN guard — used by every anchoring     #
+# window (session, rolling, ...) so the skip-vs-raise decision is    #
+# written once, not reimplemented per window with room to diverge.   #
+# ------------------------------------------------------------------ #
+
+def resolve_weight_mode_array(candles, weight_mode):
+    """Full-series weight array for a given mode. See build_profile()'s
+    docstring for what each mode means."""
+    n = len(candles["close"])
+    if weight_mode == "real_volume":
+        return candles["volume"]
+    elif weight_mode == "tick_volume":
+        return candles["number_of_trades"]
+    elif weight_mode == "tpo":
+        return np.ones(n)
+    else:
+        raise ValueError(f"unknown weight_mode {weight_mode!r}")
+
+
+class StructuralWeightGap(Exception):
+    """
+    Internal control-flow signal: "skip this window, it's a
+    structurally volume-less asset (FX)." Callers (build_session_profiles,
+    build_rolling_profiles) catch this and skip cleanly — it must never
+    reach top-level user code as an unhandled exception.
+    """
+
+
+def check_weight_window(window_weight, weight_mode, volume_is_proxy, context):
+    """
+    THE skip-vs-raise decision for NaN weight, shared across every
+    anchoring window. Found necessary the hard way (README.md section
+    20): a global "all NaN" check on the whole series missed a
+    localized crypto ingestion gap entirely, silently producing a
+    profile with NaN total_weight and a fraction of NaN bins while
+    still returning a POC/VAH/VAL as if nothing were wrong.
+
+      volume_is_proxy=True   (FX, structurally no volume) -> raises
+                              StructuralWeightGap — caller skips this
+                              window's profile for this mode, cleanly,
+                              no top-level exception. Expected case.
+      volume_is_proxy=False/None (crypto, SHOULD have volume) and ANY
+                              NaN present -> raises ValueError. A real
+                              ingestion gap; silently building a
+                              corrupted profile is worse than stopping.
+      no NaN present         -> returns normally, caller proceeds.
+    """
+    if weight_mode not in ("real_volume", "tick_volume"):
+        return
+    n_nan = int(np.isnan(window_weight).sum())
+    if n_nan == 0:
+        return
+    if volume_is_proxy is True:
+        raise StructuralWeightGap(context)
+    raise ValueError(
+        f"{context}: weight_mode={weight_mode!r} has {n_nan}/{len(window_weight)} NaN weight "
+        f"values and volume_is_proxy={volume_is_proxy!r} (not True) — this looks like a genuine "
+        f"ingestion gap on an asset that SHOULD have volume, not a structural absence. Refusing "
+        f"to build a profile from partially/fully-NaN weight — it would silently return a "
+        f"corrupted POC/VAH/VAL with no indication anything is wrong (confirmed empirically)."
+    )

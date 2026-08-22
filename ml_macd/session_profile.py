@@ -36,7 +36,9 @@ if ML_MACD_DIR in sys.path:
     sys.path.remove(ML_MACD_DIR)
 sys.path.insert(0, ML_MACD_DIR)
 
-from volume_profile import build_profile  # noqa: E402
+from volume_profile import (  # noqa: E402
+    build_profile, resolve_weight_mode_array, check_weight_window, StructuralWeightGap,
+)
 
 SECONDS_PER_DAY = 86400
 
@@ -70,28 +72,15 @@ def build_session_profiles(candles, weight_mode, atr14, atr_bin_multiple=0.10,
     """
     open_time_s = candles["open_time"].astype(np.int64)
     high, low, close = candles["high"], candles["low"], candles["close"]
-    n = len(close)
+    weight_full = resolve_weight_mode_array(candles, weight_mode)
+    volume_is_proxy = candles.get("volume_is_proxy")
 
-    if weight_mode == "real_volume":
-        weight_full = candles["volume"]
-    elif weight_mode == "tick_volume":
-        weight_full = candles["number_of_trades"]
-    elif weight_mode == "tpo":
-        weight_full = np.ones(n)
-    else:
-        raise ValueError(f"unknown weight_mode {weight_mode!r}")
-
-    if weight_mode in ("real_volume", "tick_volume") and np.isnan(weight_full).all():
-        # Fail loud, not silent: this is exactly the FX case (README.md
-        # section 2 — Twelve Data returns no volume/trade-count data for
-        # FX at all). Calling real_volume/tick_volume mode there would
-        # silently build a profile from all-NaN weight instead of
-        # respecting the binding "FX is TPO-only" decision.
-        raise ValueError(
-            f"weight_mode={weight_mode!r} but every weight value is NaN — "
-            f"this looks like FX data (volume_is_proxy={candles.get('volume_is_proxy')}), "
-            f"which is TPO-only per README.md section 2. Use mode='tpo'."
-        )
+    # NaN-weight skip-vs-raise: see volume_profile.py::check_weight_window()
+    # for the full reasoning (found necessary after real-data testing
+    # showed a global "all NaN" check missed a localized crypto
+    # ingestion gap, silently producing a corrupted profile). Checked
+    # PER SESSION below, not once globally here, using the shared
+    # helper so both anchoring windows make this decision identically.
 
     session_ids = session_boundaries(open_time_s)
     if current_time_s is None:
@@ -108,8 +97,14 @@ def build_session_profiles(candles, weight_mode, atr14, atr_bin_multiple=0.10,
         if not np.isfinite(atr_ref) or atr_ref <= 0:
             continue  # ATR not warmed up yet for this session — skip, don't fabricate
 
+        session_weight = weight_full[mask]
+        try:
+            check_weight_window(session_weight, weight_mode, volume_is_proxy, context=f"session {sid}")
+        except StructuralWeightGap:
+            continue  # FX-like: expected, skip this session's profile for this mode
+
         profile = build_profile(
-            high[mask], low[mask], weight_full[mask], atr_ref,
+            high[mask], low[mask], session_weight, atr_ref,
             mode=weight_mode, profile_source=f"session_{weight_mode}",
             atr_bin_multiple=atr_bin_multiple, value_area_pct=value_area_pct,
             in_progress=bool(sid == current_session_id),
