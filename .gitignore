@@ -21,4 +21,5 @@ sysrfx_predictor/cache/
 # Parquet cache and the local-backend model-artifact store, section 15)
 ml_macd/cache/
 ml_macd/stage3_gap_report.json
+ml_macd/measure_*.jsonl
 scripts/*.out
