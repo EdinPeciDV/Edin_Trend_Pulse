@@ -1,0 +1,15 @@
+numpy>=1.26
+
+# The core ingestion path (providers.py, data.py, verification.py,
+# gap_handling.py) needs nothing beyond numpy + Python 3.12 stdlib —
+# same deliberately-minimal philosophy as ../ml/requirements.txt.
+#
+# ml_macd/indicator_parity_check.py and ml_macd/warmup_convergence_check.py
+# are diagnostic/proof scripts, not part of the ingestion path itself,
+# and pull in two extra things NOT listed above:
+#   - ../ml/requirements.txt (scikit-learn) — both scripts import
+#     ml/features.py and ml/data.py directly.
+#   - a working `node` on PATH — indicator_parity_check.py spawns Node
+#     to run shared/indicators.js for the Python-vs-JS comparison.
+# Neither is required to backfill or verify candles; only to re-run
+# those two specific proofs.

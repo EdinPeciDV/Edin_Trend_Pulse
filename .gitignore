@@ -15,3 +15,10 @@ venv/
 
 # sysrfx_predictor (standalone script, own cache: SQLite fallback db + hyperopt cache)
 sysrfx_predictor/cache/
+
+# ml_macd (features/labels are never persisted by design — see
+# README.md section 13 — this is only for the OPTIONAL --cache-dir
+# Parquet cache and the local-backend model-artifact store, section 15)
+ml_macd/cache/
+ml_macd/stage3_gap_report.json
+scripts/*.out
