@@ -20,13 +20,7 @@ BTC/USDT backfill's 29 known 1h gap segments.
 ===================================================================
 """
 
-import os
-import sys
-
 import numpy as np
-
-ML_DIR = os.path.join(os.path.dirname(__file__), "..", "ml")
-sys.path.insert(0, os.path.abspath(ML_DIR))
 
 
 # ------------------------------------------------------------------ #

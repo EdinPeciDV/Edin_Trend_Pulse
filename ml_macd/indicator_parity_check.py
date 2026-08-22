@@ -50,9 +50,16 @@ import tempfile
 
 import numpy as np
 
-ML_DIR = os.path.join(os.path.dirname(__file__), "..", "ml")
+ML_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ml"))
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.abspath(ML_DIR))
+if ML_DIR not in sys.path:
+    sys.path.insert(0, ML_DIR)
+# ml_macd/ itself is NOT needed on sys.path here (this script imports
+# no ml_macd sibling module) — but an idempotent, order-independent
+# ML_DIR insert above is still required: an unconditional insert(0, ..)
+# would silently shadow ml_macd/data.py with ml/data.py for any OTHER
+# script that imports this one and expects ml_macd/'s own data.py —
+# exactly the bug found and fixed in gap_handling.py/labels.py.
 
 from features import wilder_rsi, rolling_vwap, _rolling_mean, _rolling_std  # noqa: E402
 import data as ml_data  # noqa: E402

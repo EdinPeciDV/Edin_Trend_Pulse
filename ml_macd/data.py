@@ -32,6 +32,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+import numpy as np
+
 from providers import (
     BinanceProvider, TwelveDataProvider, load_env_var,
 )
@@ -144,6 +146,80 @@ def query_max_open_time(symbol, timeframe, asset_class):
     if not rows:
         return None
     return datetime.fromisoformat(rows[0]["open_time"].replace("Z", "+00:00"))
+
+
+def load_candles(symbol, timeframe, asset_class):
+    """
+    PHASE 2: load a full symbol/timeframe series from macd_candles as a
+    dict of numpy arrays — the same shape convention as
+    ml/features.py's `candles` dict (open_time, open, high, low,
+    close, volume), extended with the Binance-specific columns kept
+    per PART 1's brief. Chosen over pandas deliberately: ml_macd's
+    feature builder reuses ml/features.py's numpy primitives directly
+    (wilder_rsi, atr, _ema, rolling_vwap, the _rolling_* helpers) — a
+    DataFrame would mean either re-wrapping every call or maintaining
+    two candle conventions in one codebase for no benefit.
+
+    `open_time` is int64 UNIX SECONDS (not ms) — matches
+    gap_handling.py's convention throughout, and every downstream
+    feature/gap function already expects seconds.
+
+    Paginates past PostgREST's server-side row cap exactly like
+    verification.py::fetch_all_open_times() — this is the fuller,
+    all-columns version of the same query.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set (.env)")
+
+    cols = ("open_time,open,high,low,close,volume,"
+            "number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,volume_is_proxy")
+    rows, offset = [], 0
+    while True:
+        params = {
+            "symbol": symbol, "timeframe": timeframe, "asset_class": asset_class,
+            "select": cols, "order": "open_time.asc", "offset": offset,
+        }
+        query = "&".join(
+            f"{k}=eq.{v}" if k in ("symbol", "timeframe", "asset_class") else f"{k}={v}"
+            for k, v in params.items()
+        )
+        url = f"{SUPABASE_URL}/rest/v1/macd_candles?{query}"
+        req = urllib.request.Request(url, headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        })
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            batch = json.loads(resp.read())
+        if not batch:
+            break
+        rows.extend(batch)
+        offset += len(batch)
+
+    if not rows:
+        return None
+
+    def col(name, dtype, none_value=np.nan):
+        return np.array(
+            [none_value if r[name] is None else r[name] for r in rows], dtype=dtype
+        )
+
+    open_time_s = np.array([
+        datetime.fromisoformat(r["open_time"].replace("Z", "+00:00")).timestamp() for r in rows
+    ], dtype=np.int64)
+
+    return {
+        "open_time": open_time_s,
+        "open": col("open", np.float64),
+        "high": col("high", np.float64),
+        "low": col("low", np.float64),
+        "close": col("close", np.float64),
+        "volume": col("volume", np.float64),
+        "number_of_trades": col("number_of_trades", np.float64),
+        "taker_buy_base_volume": col("taker_buy_base_volume", np.float64),
+        "taker_buy_quote_volume": col("taker_buy_quote_volume", np.float64),
+        "volume_is_proxy": rows[0]["volume_is_proxy"],
+        "symbol": symbol, "timeframe": timeframe, "asset_class": asset_class,
+    }
 
 
 def resolve_backfill_start(symbol, timeframe, asset_class, requested_start, resume):

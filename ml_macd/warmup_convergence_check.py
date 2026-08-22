@@ -35,8 +35,14 @@ import sys
 
 import numpy as np
 
-ML_DIR = os.path.join(os.path.dirname(__file__), "..", "ml")
-sys.path.insert(0, os.path.abspath(ML_DIR))
+ML_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ml"))
+if ML_DIR not in sys.path:
+    sys.path.insert(0, ML_DIR)
+# Idempotent insert, not unconditional — see indicator_parity_check.py's
+# comment on the same line for why. This file's `import data` below
+# deliberately means ml/data.py (its synthetic_random_walk()), not
+# ml_macd/data.py — correct only because ml_macd/'s own directory is
+# never added to sys.path here.
 
 from features import _ema, wilder_rsi, atr  # noqa: E402
 import data as ml_data  # noqa: E402

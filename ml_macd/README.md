@@ -1040,3 +1040,145 @@ still design (sections 13/15) — none of that code exists yet. A
 "rebuild from scratch" right now gets you back to exactly where
 Stage 5 left off (a fully populated `macd_candles`), not a trained
 model — because nothing past ingestion has been built.
+
+## 16. Phase 2 — features and labels
+
+Built and tested against real data. Stopping here, before training,
+per the original plan.
+
+`ml_macd/macd_features.py` — the full PART 1 feature set (44 columns):
+MACD core (normalized by both close and ATR, `macd_above_zero`
+regime flag), crossover dynamics (`bars_since_cross`,
+`cross_direction`, ATR-normalized price move since cross), histogram
+gap dynamics (1/3/5-bar slope + second difference, `hist_ratio`
+bounded to [0,1] since last cross, `bars_since_hist_peak`),
+multi-timeframe (HTF regime + cross direction, as-of aligned to the
+last CLOSED higher-timeframe bar, `htf_alignment`), divergence
+(explicitly defined as a trailing-window price-extreme-without-
+momentum-confirmation flag, not a general swing detector), order flow
+(crypto-only, exactly 0 — never NaN — for forex), and context (Wilder
+RSI, Bollinger width, VWAP distance gated to non-forex per PART 2's
+binding conflict resolution, ATR percentile rank over 200 bars,
+cyclical hour, one-hot session/day-of-week). PART 2 additions:
+`gap_size_atr`, `is_session_open_bar` (proxied from
+`bars_missing_before` — no real FX holiday calendar exists in this
+project, disclosed rather than faked), and `bars_missing_before`/
+`is_post_gap_bar` passed straight through from `gap_handling.py`,
+not recomputed. `bars_until_session_close` is NOT built — same
+missing-holiday-calendar reason — always NaN, disclosed rather than
+silently omitted from the column list.
+
+`ml_macd/labels.py` — the N×band grid (`{4,8,12,24,48} x
+{0.25,0.5,1.0,1.5}`), gap-aware for real: every label's validity comes
+directly from `gap_handling.py::label_validity_by_timestamp()`, not
+reimplemented. Reports class balance and drop rate per grid cell —
+"which combos are most predictable" (PART 1) needs a trained model
+and stays deferred; this reports what needs no model.
+
+### Three real bugs found while testing against real data
+
+**1. A stationarity violation in `hist_slope_1/3/5`/`hist_slope_2nd_diff`** —
+caught by a plain range sanity check (values up to ~1000, not the
+expected roughly-unit scale). Root cause: computed from the raw,
+unnormalized MACD histogram (price units), not `hist_norm_atr` — on
+BTC this silently encodes price level into a feature the file's own
+opening rule explicitly forbids ("never feed raw price"). A model
+using this feature would not transfer from BTC at $4k to BTC at $90k.
+Fixed by computing the slope from `hist_norm_atr` instead; re-verified
+range is now consistently near [-1, 1].
+
+**2. A module-name collision that silently loaded the wrong data —
+found and fixed twice, the second time more subtle.** First:
+naming the new feature file `ml_macd/features.py` collided with
+`ml/features.py`'s module name (this file legitimately needs both on
+`sys.path` at once, since it imports the sibling module's primitives)
+— renamed to `macd_features.py` before ever testing, with the reason
+recorded in its own docstring. Second, worse because it passed an
+initial smoke test before failing: `ml_macd/data.py` ALSO collides
+with `ml/data.py`, and `gap_handling.py`'s own unconditional
+`sys.path.insert(0, ML_DIR)` — which ran every time gap_handling.py
+was imported, including as a dependency of `labels.py` — silently
+re-pushed `ml/` ahead of `ml_macd/` on `sys.path` mid-way through
+`labels.py`'s own execution. The result: `import data as ml_data`
+inside `labels.py`'s self-test resolved to `ml/data.py`'s unrelated
+`load_candles()` (a local `.npz`-cache loader) instead of
+`ml_macd/data.py`'s Supabase-backed one — surfaced as a bare
+`TypeError` deep inside `ml/data.py`, not an obvious naming bug.
+**Root cause turned out to be dead code**: `gap_handling.py` doesn't
+actually import anything from `ml/` at all — the `sys.path` lines were
+unnecessary and simply deleted. Fixed more broadly too, since the
+same class of bug could recur: every file that inserts `ML_DIR` now
+does so idempotently, and every file that needs `ml_macd/`'s own
+directory on `sys.path` now removes-then-reinserts it at position 0
+as the last step, so the final order is deterministic regardless of
+which file gets imported first. Verified with a direct stress test:
+importing `labels` then `data` fresh in the same process now
+correctly resolves to `ml_macd/data.py`, and `macd_features` +
+`labels` imported together (the realistic real-usage pattern) both
+resolve correctly too.
+
+**3. The ctypes-based RAM measurement itself returned 0.0 on the
+first attempt** (see below) — `GetProcessMemoryInfo` "succeeded" while
+leaving every field zero, because `ctypes.windll.psapi`'s default
+argtypes/restype misinterpret pointer/return types on 64-bit Windows.
+Fixed by setting them explicitly.
+
+### Verification against real data
+
+- **No-lookahead** (`assert_no_lookahead()`, same truncate-and-recompute
+  method as `ml/features.py`): passes on BTC/USDT (crypto) and
+  EUR/USD (forex) — the two paths that exercise materially different
+  code (order-flow/VWAP gating). Tolerance relaxed to `1e-6` from
+  `ml/`'s `1e-9`: `build_features()` returns `float32` (storage
+  requirement below), which only has ~7 significant digits, and `1e-9`
+  would risk flagging ordinary rounding noise as a leak.
+- **Multi-timeframe alignment**, spot-checked directly against a
+  manual as-of computation at 8 bars spanning the full BTC/USDT
+  history (accounting for the shift-by-1 — `X[i]` reflects bar `i-1`'s
+  raw computation, so the manual check used bar `i-1`'s own
+  `open_time`, not bar `i`'s): 8/8 correct.
+- **Label threshold test**: a deliberately constructed series with a
+  clear up move, clear down move, and a move inside the flat band,
+  each at a known ATR — all three classify correctly at the
+  ATR-scaled boundary.
+- `gap_handling.py`'s own tests (already passing, not re-tested here)
+  cover the gap-exclusion logic `labels.py` calls into.
+
+### Measured, not guessed — RAM and wall-clock
+
+Per the storage requirement: measured directly (native Windows
+`GetProcessMemoryInfo` via `ctypes`, no new dependency added — see
+bug #3 above), one fresh subprocess per symbol so peak working set is
+a true per-symbol number, not cumulative across a batch:
+
+| Symbol | Bars | Peak RSS (MB) | Load (s) | Features (s) | Labels (s) | Total (s) |
+|---|---|---|---|---|---|---|
+| BTC/USDT | 78,373 | 190.8 | 38.8 | 5.5 | 2.1 | 46.4 |
+| ETH/USDT | 78,373 | 191.6 | 39.6 | 5.5 | 2.2 | 47.3 |
+| SOL/USDT | 52,319 | 141.1 | 27.2 | 3.8 | 2.3 | 33.2 |
+| XRP/USDT | 72,169 | 178.6 | 37.5 | 2.6 | 1.1 | 41.2 |
+| ADA/USDT | 72,581 | 179.1 | 36.5 | 4.4 | 1.8 | 42.7 |
+| DOGE/USDT | 61,961 | 158.4 | 33.5 | 3.9 | 1.5 | 38.9 |
+| AVAX/USDT | 51,311 | 136.9 | 28.2 | 3.0 | 1.2 | 32.4 |
+| LINK/USDT | 66,027 | 166.1 | 34.9 | 2.6 | 1.2 | 38.7 |
+| LTC/USDT | 75,549 | 184.5 | 39.0 | 4.6 | 1.9 | 45.5 |
+| DOT/USDT | 52,134 | 140.7 | 27.1 | 3.2 | 1.3 | 31.5 |
+| EUR/USD | 42,415 | 115.3 | 20.8 | 2.5 | 1.1 | 24.4 |
+| GBP/USD | 42,474 | 115.6 | 21.7 | 2.4 | 1.1 | 25.2 |
+
+**Peak RAM: 115–192MB per symbol** (both entry + HTF series loaded,
+44-column float32 feature matrix, full label grid) — well within
+"bounded," never approaching a concern on any machine this would
+realistically run on. **Total wall-clock, all 12 symbols, sequential
+one-process-each: ~447s (~7.5 minutes).**
+
+**The number that actually matters for the caching decision**: load
+time (Supabase network round-trip, averaging ~33s/symbol) dominates
+total time by roughly 6:1 over compute (`features` + `labels`
+combined average ~5.3s/symbol). **A feature cache would mostly be
+caching against network latency, not recomputation cost** — a
+materially different justification than "recompute is slow," worth
+weighing directly against `--cache-dir`'s own cost (staleness risk
+while the feature set is still being iterated on, per section 13)
+when that decision actually comes up. At ~5.3s of real compute per
+symbol, recompute is not remotely "annoying" yet.

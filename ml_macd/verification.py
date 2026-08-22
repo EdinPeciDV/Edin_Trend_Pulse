@@ -18,7 +18,14 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.dirname(__file__))
+ML_MACD_DIR = os.path.dirname(os.path.abspath(__file__))
+if ML_MACD_DIR in sys.path:
+    sys.path.remove(ML_MACD_DIR)
+sys.path.insert(0, ML_MACD_DIR)
+# Same remove-then-reinsert pattern as macd_features.py/labels.py —
+# not currently at risk (nothing in ml/ is named gap_handling.py or
+# providers.py), but consistent and cheap insurance against the same
+# class of bug if that ever changes.
 
 from gap_handling import bars_missing_before, misaligned_bars, bar_durations  # noqa: E402
 from providers import load_env_var  # noqa: E402
